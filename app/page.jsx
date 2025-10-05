@@ -21,12 +21,84 @@ export default function App() {
   //   }));
   // }
 
+  const getCreature = () => {
+  const selectedParts = {};
+  // for (const part in buttonStates) {
+  //   const selectedButton = Object.keys(buttonStates[part]).find(key => buttonStates[part][key]);
+  //   if (selectedButton) {
+  //     const partIndex = parseInt(selectedButton, 10) - 1; // Convert to zero-based index
+  //     selectedParts[part] = parts[part][partIndex];
+  //   } else {
+  //     selectedParts[part] = null; // No selection for this part
+  //   }
+    // }
+    for (const part in buttonStates) {
+      if (buttonStates[part] ) {
+        console.log('...');
+      }
+      const selectedButton = Object.keys(buttonStates[part]).find(key => buttonStates[part][key]);
+      // console.log(selectedButton);
+
+      if (selectedButton) {
+        const partIndex = parseInt(selectedButton, parts[part].length) - 1;
+        console.log(partIndex);
+        selectedParts[part] = parts[part][partIndex];
+      }
+      else {
+        selectedParts[part] = null; // No selection for this part
+      }
+    }
+
+    const partsArray = Object.keys(selectedParts).map(key => [key, selectedParts[key]]);
+    console.log(partsArray);
+
+    // I want to make it so that it only includes the parts that have been selected
+    const filteredPartsArray = partsArray.filter(([key, value]) => value !== null);
+    console.log(filteredPartsArray);
+
+    // now I need to make the string for each part
+    const partsStringArray = filteredPartsArray.map(([key, value]) => `the ${key} of a ${value}`);
+    console.log(partsStringArray);
+
+    // now I need to join the array into a string with commas and "and" before the last item
+    const partsString = partsStringArray.join(', ').replace(/, ([^,]*)$/, ' and $1'); // how does this line work??? wtf
+    console.log(partsString);
+
+    // finally, I need to make the final string
+    const finalString = `you have created a creature with ${partsString}.`;
+    console.log(finalString);
+
+    // console.log(selectedParts);
+    // console.log(
+    //   `you have created a creature with ${selectedParts.head ?? `the head of a ${selectedParts.head}`}, ${`the body of a ${selectedParts.body}`}, ${`the arms of a ${selectedParts.arms}`}, ${`the legs of a ${selectedParts.legs}`}, ${`the tail of a ${selectedParts.tail}`}, and ${`the wings of a ${selectedParts.wings}`}`
+    // );
+    return selectedParts;
+    
+  // console.log(buttonStates);
+  // return selectedParts;
+}
+
+// console.log(getCreature(buttonStates));
+
+
+
   return (
     <div className='flex min-h-screen flex-col py-2'>
       <h1 className='text-4xl'>greenbottle's toolbelt</h1>
 
       <div className='creature-generator border p-2'>
         <div>creature generator</div>
+
+        <button
+          className="btn btn-primary"
+          onClick={() => {
+            let creature = getCreature(buttonStates);
+
+            // console.log(creature.head);
+          }}
+            let >
+          generate
+        </button>
 
         <div className="flex p-2 gap-2">
           <PartsColumnElement
@@ -104,25 +176,25 @@ const PartsColumnElement = ({ part, partNames, buttonStates, setButtonStates }) 
 const PartsButtonGroup = ({ part, partNames, buttonStates, setButtonStates }) => (
   <>
     {partNames.map((name, index) => {
-      const id = `${part}${index + 1}`;
-      // const buttonId = index + 1;
-      // const isActive = buttonStates[part][buttonId];
-
+      const buttonId = index + 1;
+      const isActive = buttonStates[part]?.[buttonId] || false;
+      
       return (
         <button
-          key={id}
-          id={id}
-          className={`btn ${buttonStates[id] ? '' : 'btn-soft'} btn-primary`}
-          onClick={() => 
+          key={buttonId}
+          className={`btn ${!isActive ? 'btn-soft' : ''} btn-primary`}
+          onClick={() =>
             setButtonStates(prev => ({
               ...prev,
-              [id]: !prev[id]
+              [part]: {
+                [buttonId]: !isActive  // Toggle this button, all others become undefined/false
+              }
             }))
           }
         >
-          {`${index + 1}: ${name}`}
+          {`${buttonId}: ${name}`}
         </button>
-      )
+      );
     })}
   </>
 )
