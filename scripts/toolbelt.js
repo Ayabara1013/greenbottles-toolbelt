@@ -180,8 +180,104 @@ class GBHeroPoints {
   static RESOURCE_PATH = 'system.resources.heroPoints.value';
 
   static initialize() {
+    GBHeroPoints.registerSettings();
     Hooks.on('getSceneControlButtons', controls => GBHeroPoints._addToolbarButton(controls));
+    Hooks.once('ready', () => GBHeroPoints.sessionStartCheck());
     console.log("Greenbottle's Toolbelt | Hero Points initialized");
+  }
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+
+  static registerSettings() {
+    game.settings.register(GBToolbelt.MODULE_ID, 'sessionTopUpEnabled', {
+      name: 'Session Start: Enable Top-Up Prompt',
+      hint: 'When enabled, a prompt appears at the start of each session to top up party hero points.',
+      scope: 'world',
+      config: true,
+      type: Boolean,
+      default: false
+    });
+
+    game.settings.register(GBToolbelt.MODULE_ID, 'sessionTopUpAmount', {
+      name: 'Session Start: Top-Up Amount',
+      hint: 'Party members below this value will be topped up to this amount when the session starts.',
+      scope: 'world',
+      config: true,
+      type: Number,
+      default: 1
+    });
+
+    game.settings.register(GBToolbelt.MODULE_ID, 'sessionTopUpCooldownHours', {
+      name: 'Session Start: Cooldown (hours)',
+      hint: 'Minimum hours between prompts. Prevents the dialog from re-appearing when the GM reloads mid-session. Set to 0 to always prompt on load.',
+      scope: 'world',
+      config: true,
+      type: Number,
+      default: 4
+    });
+
+    // Hidden — stores timestamp (ms) of the last time the prompt was shown.
+    game.settings.register(GBToolbelt.MODULE_ID, 'sessionTopUpLastTriggered', {
+      scope: 'world',
+      config: false,
+      type: Number,
+      default: 0
+    });
+  }
+
+  // ── Session Start ─────────────────────────────────────────────────────────
+
+  /**
+   * Called on the 'ready' hook. Checks whether the session-start top-up
+   * prompt should appear based on the enabled flag and the cooldown window.
+   */
+  static sessionStartCheck() {
+    if (!game.user.isGM) return;
+    if (!game.settings.get(GBToolbelt.MODULE_ID, 'sessionTopUpEnabled')) return;
+
+    const party = game.actors.party?.members;
+    if (!party || party.length === 0) return;
+
+    const lastTriggered = game.settings.get(GBToolbelt.MODULE_ID, 'sessionTopUpLastTriggered');
+    const cooldownHours = game.settings.get(GBToolbelt.MODULE_ID, 'sessionTopUpCooldownHours');
+    const cooldownMs = cooldownHours * 3_600_000;
+
+    if (cooldownMs > 0 && Date.now() - lastTriggered < cooldownMs) return;
+
+    // Delay slightly so the world is fully settled before the dialog appears.
+    setTimeout(() => GBHeroPoints.sessionStartPrompt(), 3000);
+  }
+
+  /**
+   * Shows the session-start top-up dialog. Updating the timestamp on both
+   * confirm and skip ensures the cooldown suppresses repeats on mid-session reloads.
+   */
+  static sessionStartPrompt() {
+    const party = game.actors.party?.members;
+    if (!party || party.length === 0) return;
+
+    const amount = game.settings.get(GBToolbelt.MODULE_ID, 'sessionTopUpAmount');
+
+    new Dialog({
+      title: 'Session Start — Hero Points',
+      content: `<p>Top up all party members to <strong>${amount}</strong> hero point(s)?</p>`,
+      buttons: {
+        topUp: {
+          label: 'Top up',
+          callback: async () => {
+            await GBHeroPoints.updateParty(amount, party, 'top-up');
+            await game.settings.set(GBToolbelt.MODULE_ID, 'sessionTopUpLastTriggered', Date.now());
+          }
+        },
+        skip: {
+          label: 'Skip',
+          callback: async () => {
+            await game.settings.set(GBToolbelt.MODULE_ID, 'sessionTopUpLastTriggered', Date.now());
+          }
+        }
+      },
+      default: 'topUp'
+    }).render(true);
   }
 
   // ── Toolbar ───────────────────────────────────────────────────────────────
