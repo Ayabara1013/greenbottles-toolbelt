@@ -162,10 +162,140 @@ class GBToolbelt {
   }
 }
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// GBHeroPoints — GM toolbar button for bulk hero point management (PF2e)
+//
+// Migrated from the standalone greenbottles-toolbelt__hero-points module.
+// Adds a star button to the Token Controls toolbar (GM only). Clicking it
+// opens a dialog with four bulk operations for the whole party:
+//   - Add 1      → increment every member by 1 (stops at max)
+//   - Set all to 2 → set everyone to exactly 2
+//   - Top up     → bring anyone below 2 up to 2 (skips those already at 2+)
+//   - Clear      → set everyone to 0
+// ════════════════════════════════════════════════════════════════════════════
+
+class GBHeroPoints {
+  /** PF2e path for a character's hero point value. */
+  static RESOURCE_PATH = 'system.resources.heroPoints.value';
+
+  static initialize() {
+    Hooks.on('getSceneControlButtons', controls => GBHeroPoints._addToolbarButton(controls));
+    console.log("Greenbottle's Toolbelt | Hero Points initialized");
+  }
+
+  // ── Toolbar ───────────────────────────────────────────────────────────────
+
+  /**
+   * Injects the "Assign Hero Points" button into the Token Controls section.
+   * Only visible to GMs.
+   * @param {SceneControl[]} controls  The full controls array from the hook.
+   */
+  static _addToolbarButton(controls) {
+    if (!game.user.isGM) return;
+
+    const tokenControls = controls.find(c => c.name === 'token');
+    if (!tokenControls) {
+      console.error("GBHeroPoints | Token controls not found — cannot add Hero Points button.");
+      return;
+    }
+
+    tokenControls.tools.push({
+      name: 'heroPoints',
+      title: 'Assign Hero Points',
+      icon: 'fas fa-star',
+      onClick: () => GBHeroPoints.openDialog(),
+      button: true
+    });
+  }
+
+  // ── Dialog ────────────────────────────────────────────────────────────────
+
+  /**
+   * Opens the Hero Points dialog. Reads the current PF2e party from
+   * game.actors.party and passes it to each button's callback.
+   */
+  static openDialog() {
+    const party = game.actors.party?.members;
+
+    if (!party || party.length === 0) {
+      ui.notifications.warn('No party members found in the Pathfinder 2e party!');
+      return;
+    }
+
+    new Dialog({
+      title: 'Assign Hero Points',
+      content: `<p>How many hero points should party members receive?</p>`,
+      buttons: {
+        one:   { label: 'Add 1',        callback: () => GBHeroPoints.updateParty(1, party, 'add') },
+        two:   { label: 'Set all to 2', callback: () => GBHeroPoints.updateParty(2, party, 'set') },
+        three: { label: 'Top up',       callback: () => GBHeroPoints.updateParty(2, party, 'top-up') },
+        four:  { label: 'Clear',        callback: () => GBHeroPoints.updateParty(0, party, 'set') }
+      },
+      default: 'two'  // "Set all to 2" is pre-selected
+    }).render(true);
+  }
+
+  // ── Update Logic ──────────────────────────────────────────────────────────
+
+  /**
+   * Applies a hero point operation to every member of the party.
+   * Uses GBToolbelt.updateActorResource() for safe clamped writes.
+   *
+   * @param {number}   amount  Target or delta value depending on mode.
+   * @param {Actor[]}  party   Array of party member Actors.
+   * @param {'add'|'set'|'top-up'} type  How to apply the amount:
+   *   - 'add'    → add amount to current value (skips members already at max)
+   *   - 'set'    → set everyone to exactly amount (also used for clear with amount=0)
+   *   - 'top-up' → only update members whose current value is below amount
+   */
+  static async updateParty(amount, party, type) {
+    for (const member of party) {
+      const name = member.prototypeToken.name ?? member.name;
+      const current = GBToolbelt.getActorResource(member, GBHeroPoints.RESOURCE_PATH);
+      const max = GBToolbelt.getActorResource(member, 'system.resources.heroPoints.max');
+
+      let newValue;
+
+      if (type === 'add') {
+        // Skip members already at the cap — adding more would have no effect.
+        if (current >= max) {
+          ui.notifications.info(`${name} is already at max hero points`);
+          continue;
+        }
+        newValue = current + amount;
+
+      } else if (type === 'set') {
+        // Direct overwrite — covers both "set all to 2" and "clear" (amount=0).
+        newValue = amount;
+
+      } else if (type === 'top-up') {
+        // Only bring members up to the target; skip anyone already there or above.
+        if (current >= amount) {
+          ui.notifications.info(`${name} already has enough hero points!`);
+          continue;
+        }
+        newValue = amount;
+
+      } else {
+        console.error(`GBHeroPoints | Unknown update type: ${type}`);
+        continue;
+      }
+
+      // GBToolbelt handles the actor.update() call, clamping, and the notification.
+      await GBToolbelt.updateActorResource(member, GBHeroPoints.RESOURCE_PATH, newValue, {
+        label: 'Hero Points'
+      });
+    }
+  }
+}
+
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 Hooks.once('init', () => {
   const module = game.modules.get(GBToolbelt.MODULE_ID);
   if (module) module.api = GBToolbelt;
   GBToolbelt.initialize();
+  GBHeroPoints.initialize();
 });
