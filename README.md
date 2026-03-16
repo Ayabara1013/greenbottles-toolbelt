@@ -10,10 +10,10 @@ Unified reference for all Greenbottle's FoundryVTT modules, built for Pathfinder
 
 | Module | Version | Purpose |
 |--------|---------|---------|
-| [greenbottles-toolbelt](#greenbottles-toolbelt) | 1.1.0 | Shared utility library + GM hero point tools (required by all others) |
-| [greenbottles-ammo-belt](#greenbottles-ammo-belt) | 1.1.2.7 | Custom SF2e ammo types + weapon assignment UI |
-| [greenbottles-hacking-quips](#greenbottles-hacking-quips) | 2.1.2 | Hacking quips, Timber Sentinel, Knives & Daggers |
-| [greenbottles-vitality-network](#greenbottles-vitality-network) | 1.1.0 | SF2e vitality network automation |
+| [greenbottles-toolbelt](#greenbottles-toolbelt) | 1.2.0 | Shared utility library + GM hero point tools (required by all others) |
+| [greenbottles-ammo-belt](#greenbottles-ammo-belt) | 1.2.0 | Custom SF2e ammo types + weapon assignment UI |
+| [greenbottles-hacking-quips](#greenbottles-hacking-quips) | 2.2.0 | Hacking quips, Timber Sentinel, Knives & Daggers |
+| [greenbottles-vitality-network](#greenbottles-vitality-network) | 1.2.0 | SF2e vitality network automation |
 
 All modules expose their packs in a single **"Greenbottle's Toolbelt"** folder in the Foundry compendium sidebar *(each module declares the same `packFolders` name; Foundry merges them automatically — the toolbelt itself has no packs)*.
 
