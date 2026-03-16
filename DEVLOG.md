@@ -66,7 +66,6 @@ The dependency is wired up but the modules aren't actually *using* the toolbelt 
 |--------|----------------|
 | ammo-belt | Replace the "find items in world + actors" code (written twice) with `GBToolbelt.findWorldItems()` |
 | vitality-network | Replace the actor update logic with `GBToolbelt.updateActorResource()` |
-| hero-points | Replace the hero point update logic with `GBToolbelt.updateActorResource()` |
 | hacking-quips | Replace `TimberSentinel.loadResources()` with `GBToolbelt.loadModuleData()` |
 
 ---
