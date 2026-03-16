@@ -1,0 +1,27 @@
+{
+  "id": "greenbottles-toolbelt",
+  "title": "Greenbottle's Toolbelt",
+  "version": "1.0.0",
+  "compatibility": {
+    "minimum": "13",
+    "verified": "13"
+  },
+  "esmodules": [
+    "scripts/toolbelt.js"
+  ],
+  "styles": [
+    "styles/toolbelt.css"
+  ],
+  "authors": [
+    {
+      "name": "Doc_",
+      "url": "https://github.com/Ayabara1013"
+    }
+  ],
+  "description": "Shared utility library for all Greenbottle's FoundryVTT modules.",
+  "url": "https://github.com/Ayabara1013/greenbottles-toolbelt",
+  "manifest": "https://github.com/Ayabara1013/greenbottles-toolbelt/releases/latest/download/module.json",
+  "download": "https://github.com/Ayabara1013/greenbottles-toolbelt/releases/latest/download/module.zip",
+  "bugs": "https://github.com/Ayabara1013/greenbottles-toolbelt/issues",
+  "changelog": "https://github.com/Ayabara1013/greenbottles-toolbelt/releases"
+}
