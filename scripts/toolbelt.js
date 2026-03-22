@@ -388,132 +388,227 @@ class GBHeroPoints {
 
 
 // ════════════════════════════════════════════════════════════════════════════
-// GBCommanderBanner — Applies Plant Banner temp HP to allied tokens (PF2e)
+// GBCommanderBanner — Automated Plant Banner temp HP for PF2e
 //
-// The Plant Banner feat (Commander 1, Battlecry! pg. 30) allows a Commander
-// to plant their banner and grant temporary HP to allies within a 30-foot
-// burst each round. This class handles the detection and application logic.
+// The Plant Banner feat (Commander 1, Battlecry! pg. 30) grants temporary HP
+// to all allies within 30 feet of the commander at the start of each of the
+// commander's turns. This class automates that via the pf2e.startTurn hook.
 //
 // Temp HP granted: 4 at level 1, +4 at 4th level and every 4 levels after.
 //   Level 1–3: 4 | 4–7: 8 | 8–11: 12 | 12–15: 16 | 16–19: 20 | 20: 24
 //
-// Usage (from a Foundry macro):
+// The banner origin is the commander token's current position (i.e. the
+// commander carries the banner with them). A future update will add a
+// placeable aura token for cases where the banner is planted separately.
+//
+// Settings:
+//   bannerHPChatCard  (default: false) — when true, posts a clickable chat
+//   card instead of auto-applying. Visible to GM + the commander's owner.
+//
+// Manual usage (outside combat, from a hotbar macro):
 //   const api = game.modules.get('greenbottles-toolbelt')?.api;
 //   await api.commanderBanner.applyBannerHP();
-//
-// NOTE: This macro uses the commander token's current position as the banner
-// origin. If the commander has moved away from their planted banner, move the
-// banner token (or a marker token) to the planted location and run the macro
-// targeting that token manually — a future update may formalize this flow.
 // ════════════════════════════════════════════════════════════════════════════
 
 class GBCommanderBanner {
   static BANNER_RANGE_FEET = 30;
 
-  // ── Feat/Class Detection ──────────────────────────────────────────────────
+  static initialize() {
+    GBCommanderBanner._registerSettings();
+
+    // Fires at the start of each combatant's turn — check if it's a commander.
+    Hooks.on('pf2e.startTurn', combatant => GBCommanderBanner._onTurnStart(combatant));
+
+    // Re-bind chat card buttons whenever a banner card is rendered/re-rendered.
+    Hooks.on('renderChatMessage', (message, html) => GBCommanderBanner._bindChatCard(message, html));
+
+    // Socket listener — lets non-GM commander players route apply requests
+    // through the GM, who has permission to update other actors.
+    Hooks.once('ready', () => {
+      if (!game.user.isGM) return;
+      game.socket.on('module.greenbottles-toolbelt', data => {
+        if (data.action !== 'commanderBanner.apply') return;
+        const token = canvas.tokens.get(data.tokenId);
+        if (token) GBCommanderBanner._applyToAllies(token, data.tempHP);
+      });
+    });
+
+    console.log("Greenbottle's Toolbelt | Commander Banner initialized");
+  }
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+
+  static _registerSettings() {
+    game.settings.register(GBToolbelt.MODULE_ID, 'bannerHPChatCard', {
+      name: 'Plant Banner: Use Chat Card Prompt',
+      hint: 'When enabled, a clickable chat card appears at the start of the '
+        + "commander's turn instead of automatically applying temp HP. "
+        + 'The GM and the commander\'s player can click it to apply.',
+      scope: 'world',
+      config: true,
+      type: Boolean,
+      default: false
+    });
+  }
+
+  // ── Hook Handlers ─────────────────────────────────────────────────────────
 
   /**
-   * Returns true if the actor has the Commander class.
-   * @param {Actor} actor
+   * Called on pf2e.startTurn. Only the GM processes this to avoid duplicate
+   * writes — the GM always has permission to update all actors.
+   * @param {CombatantPF2e} combatant
    */
-  static _hasCommanderClass(actor) {
-    return actor.itemTypes.class?.some(c => c.system.slug === 'commander') ?? false;
+  static _onTurnStart(combatant) {
+    if (!game.user.isGM) return;
+
+    const actor = combatant.actor;
+    if (!actor || !GBCommanderBanner.isCommanderWithBanner(actor)) return;
+
+    // Prefer the live canvas token object; fall back via document.
+    const token = canvas.tokens.get(combatant.tokenId) ?? combatant.token?.object;
+    if (!token) {
+      console.warn('GBCommanderBanner | Token not found on canvas for:', combatant.name);
+      return;
+    }
+
+    const level  = actor.system.details.level.value;
+    const tempHP = GBCommanderBanner.calcTempHP(level);
+
+    if (game.settings.get(GBToolbelt.MODULE_ID, 'bannerHPChatCard')) {
+      GBCommanderBanner._postChatCard(token, tempHP);
+    } else {
+      GBCommanderBanner._applyToAllies(token, tempHP);
+    }
+  }
+
+  // ── Chat Card ─────────────────────────────────────────────────────────────
+
+  /**
+   * Posts a whispered chat card with an Apply button.
+   * Recipients: all GMs + the non-GM owner of the commander actor (if any).
+   * @param {Token}  commanderToken
+   * @param {number} tempHP
+   */
+  static async _postChatCard(commanderToken, tempHP) {
+    const actor = commanderToken.actor;
+    const owner = game.users.find(u => !u.isGM && actor.testUserPermission(u, 'OWNER'));
+    const whisper = [
+      ...ChatMessage.getWhisperRecipients('GM'),
+      ...(owner ? [owner] : [])
+    ];
+
+    await ChatMessage.create({
+      content: `
+        <div class="gb-banner-card">
+          <h3>⚑ Plant Banner — ${actor.name}</h3>
+          <p>Grants <strong>${tempHP} temporary HP</strong> to allies within 30 feet.</p>
+          <button data-action="gb-apply-banner-hp"
+                  data-token-id="${commanderToken.id}"
+                  data-temp-hp="${tempHP}">
+            Apply Banner HP
+          </button>
+        </div>`,
+      speaker: ChatMessage.getSpeaker({ actor }),
+      whisper,
+      flags: {
+        [GBToolbelt.MODULE_ID]: { bannerCard: true, tokenId: commanderToken.id, tempHP }
+      }
+    });
   }
 
   /**
-   * Returns true if the actor has the Commander Dedication feat (archetype).
-   * @param {Actor} actor
+   * Binds the Apply button on a Plant Banner chat card.
+   * Handles both GM clicks (direct) and commander-player clicks (via socket).
+   * Persists the applied state so the button stays disabled after re-renders.
+   * @param {ChatMessage} message
+   * @param {jQuery}      html
    */
-  static _hasCommanderArchetype(actor) {
-    return actor.itemTypes.feat?.some(f => f.system.slug === 'commander-dedication') ?? false;
-  }
+  static _bindChatCard(message, html) {
+    const flags = message.flags?.[GBToolbelt.MODULE_ID];
+    if (!flags?.bannerCard) return;
 
-  /**
-   * Returns true if the actor has the Plant Banner feat.
-   * @param {Actor} actor
-   */
-  static _hasPlantBanner(actor) {
-    return actor.itemTypes.feat?.some(f => f.system.slug === 'plant-banner') ?? false;
-  }
+    const btn = html[0].querySelector('[data-action="gb-apply-banner-hp"]');
+    if (!btn) return;
 
-  /**
-   * Returns true if the actor qualifies as a banner commander:
-   * must have the Commander class OR Commander Dedication archetype,
-   * AND must have the Plant Banner feat.
-   * @param {Actor} actor
-   */
-  static isCommanderWithBanner(actor) {
-    if (!actor) return false;
-    const hasCommander = GBCommanderBanner._hasCommanderClass(actor)
-      || GBCommanderBanner._hasCommanderArchetype(actor);
-    return hasCommander && GBCommanderBanner._hasPlantBanner(actor);
-  }
+    // Already applied — disable and update label without re-binding.
+    if (flags.applied) {
+      btn.disabled = true;
+      btn.textContent = 'Applied ✓';
+      return;
+    }
 
-  // ── Scene Queries ─────────────────────────────────────────────────────────
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Applying…';
 
-  /**
-   * Find all tokens on the current scene that are commanders with Plant Banner.
-   * @returns {Token[]}
-   */
-  static findBannerTokens() {
-    return canvas.tokens.placeables.filter(t =>
-      GBCommanderBanner.isCommanderWithBanner(t.actor)
-    );
-  }
+      const tokenId = btn.dataset.tokenId;
+      const tempHP  = Number(btn.dataset.tempHp);
+      const token   = canvas.tokens.get(tokenId);
 
-  /**
-   * Find all allied (FRIENDLY disposition) tokens on the current scene.
-   * @returns {Token[]}
-   */
-  static findAlliedTokens() {
-    return canvas.tokens.placeables.filter(t =>
-      t.document.disposition === CONST.TOKEN_DISPOSITIONS.FRIENDLY
-    );
-  }
+      if (!token) {
+        ui.notifications.warn('GBCommanderBanner | Banner token not found on scene.');
+        btn.disabled = false;
+        btn.textContent = 'Apply Banner HP';
+        return;
+      }
 
-  // ── Math ──────────────────────────────────────────────────────────────────
+      if (game.user.isGM) {
+        await GBCommanderBanner._applyToAllies(token, tempHP);
+      } else {
+        // Non-GM: route through GM via socket.
+        game.socket.emit('module.greenbottles-toolbelt', {
+          action: 'commanderBanner.apply',
+          tokenId,
+          tempHP
+        });
+      }
 
-  /**
-   * Calculate temp HP granted by Plant Banner for a given commander level.
-   * Formula: 4 + floor(level / 4) * 4
-   * @param {number} level
-   * @returns {number}
-   */
-  static calcTempHP(level) {
-    return 4 + Math.floor(level / 4) * 4;
-  }
-
-  /**
-   * Measure the distance in feet between two tokens using Foundry's grid system.
-   * @param {Token} tokenA
-   * @param {Token} tokenB
-   * @returns {number}
-   */
-  static getDistanceFeet(tokenA, tokenB) {
-    return canvas.grid.measureDistance(tokenA.center, tokenB.center, { gridSpaces: true });
+      // Persist so the button stays disabled if the chat log re-renders.
+      await message.setFlag(GBToolbelt.MODULE_ID, 'applied', true);
+      btn.textContent = 'Applied ✓';
+    });
   }
 
   // ── Application ───────────────────────────────────────────────────────────
 
   /**
-   * Apply temp HP to an actor if the new value is higher than what they
-   * already have. PF2e temp HP doesn't stack — always take the highest.
-   *
-   * @param {Actor}  actor
+   * Grants temp HP to all FRIENDLY tokens within the banner burst radius
+   * of the given commander token. Posts a GM-only summary to chat.
+   * @param {Token}  commanderToken  Token whose position is the burst origin.
    * @param {number} tempHP
-   * @returns {Promise<boolean>}  true if the actor was updated.
    */
-  static async applyTempHP(actor, tempHP) {
-    const current = actor.system.attributes.hp?.temp ?? 0;
-    if (tempHP <= current) return false;
-    await actor.update({ 'system.attributes.hp.temp': tempHP });
-    return true;
+  static async _applyToAllies(commanderToken, tempHP) {
+    const alliedTokens = GBCommanderBanner.findAlliedTokens();
+    const buffed    = [];
+    const alreadyAt = [];
+
+    for (const allied of alliedTokens) {
+      const dist = GBCommanderBanner.getDistanceFeet(commanderToken, allied);
+      if (dist <= GBCommanderBanner.BANNER_RANGE_FEET) {
+        const updated = await GBCommanderBanner.applyTempHP(allied.actor, tempHP);
+        (updated ? buffed : alreadyAt).push(allied.name);
+      }
+    }
+
+    const buffedStr  = buffed.length    ? buffed.join(', ')    : '<em>none</em>';
+    const alreadyStr = alreadyAt.length
+      ? ` <em>(already at ${tempHP}+: ${alreadyAt.join(', ')})</em>`
+      : '';
+
+    ChatMessage.create({
+      content: `<h3>⚑ Plant Banner — Temp HP Applied</h3>`
+        + `<p><b>${commanderToken.name}</b> — <b>${tempHP} temp HP</b><br>`
+        + `Granted: ${buffedStr}${alreadyStr}</p>`,
+      whisper: ChatMessage.getWhisperRecipients('GM')
+    });
   }
 
+  // ── Public API ────────────────────────────────────────────────────────────
+
   /**
-   * Main entry point — finds all Commander+Plant Banner tokens on the scene,
-   * then grants temp HP to every allied token within the 30-foot burst.
-   * Whispers a summary to the GM.
+   * Manually scan the scene for commanders and apply banner HP.
+   * Respects the bannerHPChatCard setting.
+   * Useful outside of active combat (e.g. from a hotbar macro).
    */
   static async applyBannerHP() {
     if (!canvas.scene) {
@@ -523,40 +618,103 @@ class GBCommanderBanner {
     const bannerTokens = GBCommanderBanner.findBannerTokens();
     if (bannerTokens.length === 0) {
       return ui.notifications.warn(
-        'No tokens with the Commander class/archetype and Plant Banner feat found on this scene.'
+        'No tokens with Commander class/archetype and Plant Banner found on this scene.'
       );
     }
 
-    const alliedTokens = GBCommanderBanner.findAlliedTokens();
-    const summaryLines = [];
-
-    for (const bannerToken of bannerTokens) {
-      const actor      = bannerToken.actor;
-      const level      = actor.system.details.level.value;
-      const tempHP     = GBCommanderBanner.calcTempHP(level);
-      const buffed     = [];
-      const alreadyAt  = [];
-
-      for (const allied of alliedTokens) {
-        const dist = GBCommanderBanner.getDistanceFeet(bannerToken, allied);
-        if (dist <= GBCommanderBanner.BANNER_RANGE_FEET) {
-          const updated = await GBCommanderBanner.applyTempHP(allied.actor, tempHP);
-          (updated ? buffed : alreadyAt).push(allied.name);
-        }
+    const useChatCard = game.settings.get(GBToolbelt.MODULE_ID, 'bannerHPChatCard');
+    for (const token of bannerTokens) {
+      const level  = token.actor.system.details.level.value;
+      const tempHP = GBCommanderBanner.calcTempHP(level);
+      if (useChatCard) {
+        await GBCommanderBanner._postChatCard(token, tempHP);
+      } else {
+        await GBCommanderBanner._applyToAllies(token, tempHP);
       }
-
-      const buffedStr    = buffed.length    ? buffed.join(', ')    : '<em>none</em>';
-      const alreadyStr   = alreadyAt.length ? ` (already at ${tempHP}+: ${alreadyAt.join(', ')})` : '';
-      summaryLines.push(
-        `<b>⚑ ${bannerToken.name}'s Banner</b> — <b>${tempHP} temp HP</b> (lv. ${level})<br>`
-        + `Granted: ${buffedStr}${alreadyStr}`
-      );
     }
+  }
 
-    ChatMessage.create({
-      content : `<h3>Plant Banner — Temp HP Applied</h3>` + summaryLines.map(l => `<p>${l}</p>`).join(''),
-      whisper : ChatMessage.getWhisperRecipients('GM')
-    });
+  // ── Scene Queries ─────────────────────────────────────────────────────────
+
+  /**
+   * All tokens on the current scene that qualify as banner commanders.
+   * @returns {Token[]}
+   */
+  static findBannerTokens() {
+    return canvas.tokens.placeables.filter(t => GBCommanderBanner.isCommanderWithBanner(t.actor));
+  }
+
+  /**
+   * All FRIENDLY-disposition tokens on the current scene.
+   * @returns {Token[]}
+   */
+  static findAlliedTokens() {
+    return canvas.tokens.placeables.filter(t =>
+      t.document.disposition === CONST.TOKEN_DISPOSITIONS.FRIENDLY
+    );
+  }
+
+  // ── Feat / Class Detection ────────────────────────────────────────────────
+
+  static _hasCommanderClass(actor) {
+    return actor.itemTypes.class?.some(c => c.system.slug === 'commander') ?? false;
+  }
+
+  static _hasCommanderArchetype(actor) {
+    return actor.itemTypes.feat?.some(f => f.system.slug === 'commander-dedication') ?? false;
+  }
+
+  static _hasPlantBanner(actor) {
+    return actor.itemTypes.feat?.some(f => f.system.slug === 'plant-banner') ?? false;
+  }
+
+  /**
+   * Returns true if the actor qualifies as a banner commander:
+   * (Commander class OR Commander Dedication) AND Plant Banner feat.
+   * @param {Actor} actor
+   */
+  static isCommanderWithBanner(actor) {
+    if (!actor) return false;
+    const hasCommander = GBCommanderBanner._hasCommanderClass(actor)
+      || GBCommanderBanner._hasCommanderArchetype(actor);
+    return hasCommander && GBCommanderBanner._hasPlantBanner(actor);
+  }
+
+  // ── Math ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Temp HP formula for Plant Banner.
+   * 4 at level 1, +4 at 4th level and every 4 levels thereafter.
+   * Level 1–3: 4 | 4–7: 8 | 8–11: 12 | 12–15: 16 | 16–19: 20 | 20: 24
+   * @param {number} level
+   * @returns {number}
+   */
+  static calcTempHP(level) {
+    return 4 + Math.floor(level / 4) * 4;
+  }
+
+  /**
+   * Grid-based distance in feet between two token centers.
+   * @param {Token} tokenA
+   * @param {Token} tokenB
+   * @returns {number}
+   */
+  static getDistanceFeet(tokenA, tokenB) {
+    return canvas.grid.measureDistance(tokenA.center, tokenB.center, { gridSpaces: true });
+  }
+
+  /**
+   * Apply temp HP to an actor only if the new value exceeds what they have.
+   * PF2e temp HP does not stack — always take the highest.
+   * @param {Actor}  actor
+   * @param {number} tempHP
+   * @returns {Promise<boolean>}  true if the actor was updated.
+   */
+  static async applyTempHP(actor, tempHP) {
+    const current = actor.system.attributes.hp?.temp ?? 0;
+    if (tempHP <= current) return false;
+    await actor.update({ 'system.attributes.hp.temp': tempHP });
+    return true;
   }
 }
 
@@ -571,4 +729,5 @@ Hooks.once('init', () => {
   }
   GBToolbelt.initialize();
   GBHeroPoints.initialize();
+  GBCommanderBanner.initialize();
 });
