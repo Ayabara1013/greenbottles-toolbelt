@@ -590,10 +590,13 @@ class GBCommanderBanner {
 
       if (updated) {
         const change = prev > 0 ? `${prev} → ${next}` : `${next}`;
-        lines.push(`<li>✓ <b>${allied.name}</b> — ${change} temp HP</li>`);
+        lines.push(`<li><b>${allied.name}</b><br>has gained ${change} temp HP</li>`);
         ui.notifications.info(`${allied.name}: ${change} temp HP (Plant Banner)`);
       } else {
-        lines.push(`<li>— <b>${allied.name}</b> — already had ${prev} temp HP (> ${tempHP})</li>`);
+        const alreadyMsg = prev > tempHP
+          ? `already has more than ${tempHP} temp HP (${prev})`
+          : `already has ${prev} temp HP`;
+        lines.push(`<li><b>${allied.name}</b><br>${alreadyMsg}</li>`);
       }
     }
 
