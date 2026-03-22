@@ -573,32 +573,37 @@ class GBCommanderBanner {
 
   /**
    * Grants temp HP to all FRIENDLY tokens within the banner burst radius
-   * of the given commander token. Posts a GM-only summary to chat.
+   * of the given commander token. Posts a GM-only summary to chat and shows
+   * a brief toast notification for each actor that received temp HP.
    * @param {Token}  commanderToken  Token whose position is the burst origin.
    * @param {number} tempHP
    */
   static async _applyToAllies(commanderToken, tempHP) {
     const alliedTokens = GBCommanderBanner.findAlliedTokens();
-    const buffed    = [];
-    const alreadyAt = [];
+    const lines = [];
 
     for (const allied of alliedTokens) {
       const dist = GBCommanderBanner.getDistanceFeet(commanderToken, allied);
-      if (dist <= GBCommanderBanner.BANNER_RANGE_FEET) {
-        const updated = await GBCommanderBanner.applyTempHP(allied.actor, tempHP);
-        (updated ? buffed : alreadyAt).push(allied.name);
+      if (dist > GBCommanderBanner.BANNER_RANGE_FEET) continue;
+
+      const { updated, prev, next } = await GBCommanderBanner.applyTempHP(allied.actor, tempHP);
+
+      if (updated) {
+        const change = prev > 0 ? `${prev} → ${next}` : `${next}`;
+        lines.push(`<li>✓ <b>${allied.name}</b> — ${change} temp HP</li>`);
+        ui.notifications.info(`${allied.name}: ${change} temp HP (Plant Banner)`);
+      } else {
+        lines.push(`<li>— <b>${allied.name}</b> — already had ${prev} temp HP (> ${tempHP})</li>`);
       }
     }
 
-    const buffedStr  = buffed.length    ? buffed.join(', ')    : '<em>none</em>';
-    const alreadyStr = alreadyAt.length
-      ? ` <em>(already at ${tempHP}+: ${alreadyAt.join(', ')})</em>`
-      : '';
+    if (lines.length === 0) {
+      lines.push('<li><em>No allies in range.</em></li>');
+    }
 
     ChatMessage.create({
-      content: `<h3>⚑ Plant Banner — Temp HP Applied</h3>`
-        + `<p><b>${commanderToken.name}</b> — <b>${tempHP} temp HP</b><br>`
-        + `Granted: ${buffedStr}${alreadyStr}</p>`,
+      content: `<h3>⚑ Plant Banner — ${commanderToken.name} (${tempHP} temp HP)</h3>`
+        + `<ul style="margin:0.25em 0; padding-left:1.25em">${lines.join('')}</ul>`,
       whisper: ChatMessage.getWhisperRecipients('GM')
     });
   }
@@ -708,13 +713,13 @@ class GBCommanderBanner {
    * PF2e temp HP does not stack — always take the highest.
    * @param {Actor}  actor
    * @param {number} tempHP
-   * @returns {Promise<boolean>}  true if the actor was updated.
+   * @returns {Promise<{updated: boolean, prev: number, next: number}>}
    */
   static async applyTempHP(actor, tempHP) {
-    const current = actor.system.attributes.hp?.temp ?? 0;
-    if (tempHP <= current) return false;
+    const prev = actor.system.attributes.hp?.temp ?? 0;
+    if (tempHP <= prev) return { updated: false, prev, next: prev };
     await actor.update({ 'system.attributes.hp.temp': tempHP });
-    return true;
+    return { updated: true, prev, next: tempHP };
   }
 }
 
