@@ -1,7 +1,7 @@
 {
   "id": "greenbottles-toolbelt",
   "title": "Greenbottle's Toolbelt",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "compatibility": {
     "minimum": "13",
     "verified": "13"
@@ -12,13 +12,22 @@
   "styles": [
     "styles/toolbelt.css"
   ],
+  "relationships": {
+    "optional": [
+      {
+        "id": "portal-lib",
+        "type": "module",
+        "reason": "Required for the Place Banner crosshair placement UI (Plant Banner feat, Phase 2)."
+      }
+    ]
+  },
   "authors": [
     {
       "name": "Doc_",
       "url": "https://github.com/Ayabara1013"
     }
   ],
-  "description": "Shared utility library for all Greenbottle's FoundryVTT modules. Includes GM hero point management tools for PF2e.",
+  "description": "Shared utility library for all Greenbottle's FoundryVTT modules. Includes GM hero point management and automated Plant Banner temp HP for PF2e commanders.",
   "url": "https://github.com/Ayabara1013/greenbottles-toolbelt",
   "manifest": "https://github.com/Ayabara1013/greenbottles-toolbelt/releases/latest/download/module.json",
   "download": "https://github.com/Ayabara1013/greenbottles-toolbelt/releases/latest/download/module.zip",
