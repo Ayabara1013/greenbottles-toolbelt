@@ -17,7 +17,7 @@
       {
         "id": "portal-lib",
         "type": "module",
-        "reason": "Required for the Place Banner crosshair placement UI (Plant Banner feat, Phase 2)."
+        "reason": "Required for the Place Banner token placement UI (Plant Banner feat, Phase 2)."
       }
     ]
   },

@@ -459,9 +459,9 @@ class GBCommanderBanner {
           const token = canvas.tokens.get(data.tokenId);
           if (token) GBCommanderBanner._applyToAllies(token, data.tempHP);
 
-        } else if (data.action === 'commanderBanner.place') {
-          GBCommanderBanner._createBannerTokenAndTemplate(
-            data.commanderTokenId, data.x, data.y, data.tempHP
+        } else if (data.action === 'commanderBanner.initialize') {
+          GBCommanderBanner._initializeBannerToken(
+            data.bannerTokenId, data.commanderTokenId, data.commanderActorId, data.tempHP
           );
 
         } else if (data.action === 'commanderBanner.cleanup') {
@@ -745,10 +745,13 @@ class GBCommanderBanner {
   }
 
   /**
-   * Open a Portal crosshair to plant a Commander's Banner token on the scene.
-   * If a banner is already deployed for this commander, offers to replace it.
+   * Open a Portal placement cursor to plant a Commander's Banner token on the scene.
+   * Uses Portal's builder API: new Portal().addCreature().origin().pick().spawn()
+   * Portal handles GM permission escalation internally via socketlib.
+   *
+   * After spawn, flags the token and drops the 30ft aura template.
    * Select your commander token on the canvas before calling, or pass it directly.
-   * Requires the portal-lib module to be active.
+   *
    * @param {Token|null} commanderToken  Defaults to the first controlled canvas token.
    */
   static async placeBanner(commanderToken = null) {
@@ -764,6 +767,11 @@ class GBCommanderBanner {
       return;
     }
 
+    if (typeof Portal === 'undefined') {
+      ui.notifications.error('GBCommanderBanner | Portal (portal-lib) must be active for banner placement.');
+      return;
+    }
+
     // If a banner is already planted, offer to replace it.
     const existing = GBCommanderBanner._findBannerTokenForCommander(commanderToken.actor.id);
     if (existing) {
@@ -775,26 +783,39 @@ class GBCommanderBanner {
       await GBCommanderBanner._cleanupBannerForCommander(commanderToken.actor.id);
     }
 
-    const position = await GBCommanderBanner._showCrosshair(
-      `Plant ${commanderToken.name}'s Banner`,
-      GBCommanderBanner.BANNER_ICON
+    // The banner actor is created on the GM's ready hook — find it now.
+    const bannerActor = game.actors.find(a =>
+      a.getFlag(GBToolbelt.MODULE_ID, GBCommanderBanner.BANNER_ACTOR_FLAG) === true
     );
-    if (!position) return; // Cancelled
+    if (!bannerActor) {
+      ui.notifications.error('GBCommanderBanner | Banner actor not found. Ask your GM to reload the module.');
+      return;
+    }
 
     const level  = commanderToken.actor.system.details.level.value;
     const tempHP = GBCommanderBanner.calcTempHP(level);
 
+    // Portal: show placement cursor then spawn. Portal handles GM escalation internally.
+    const portal = new Portal()
+      .addCreature(bannerActor.uuid)
+      .origin(commanderToken);
+
+    await portal.pick();
+    const spawned = await portal.spawn();
+    const spawnedToken = spawned?.[0] ?? null;
+    if (!spawnedToken) return;
+
+    // Flag the token and create the aura template (requires GM permission).
     if (game.user.isGM) {
-      await GBCommanderBanner._createBannerTokenAndTemplate(
-        commanderToken.id, position.x, position.y, tempHP
+      await GBCommanderBanner._initializeBannerToken(
+        spawnedToken.id, commanderToken.id, commanderToken.actor.id, tempHP
       );
     } else {
-      // Non-GM: route creation through the GM via socket.
       game.socket.emit('module.greenbottles-toolbelt', {
-        action: 'commanderBanner.place',
+        action:           'commanderBanner.initialize',
+        bannerTokenId:    spawnedToken.id,
         commanderTokenId: commanderToken.id,
-        x: position.x,
-        y: position.y,
+        commanderActorId: commanderToken.actor.id,
         tempHP
       });
     }
@@ -803,40 +824,56 @@ class GBCommanderBanner {
   // ── Banner Token / Template ────────────────────────────────────────────────
 
   /**
-   * Shows a Portal crosshair placement cursor and returns the grid-snapped
-   * centre of the selected cell, or null if the user cancels.
+   * Shows a native canvas placement cursor and returns the grid-snapped
+   * centre of the clicked cell, or null if the user presses Escape.
    *
-   * Uses portal-lib by theripper93 (CrossHairs.show static API).
-   * If the API shape differs in your installed version, adjust here.
-   * @param {string} label
-   * @param {string} [iconUrl]
+   * Works without any external dependencies — listens for a single left-click
+   * on the HTML canvas element, converts screen → world coordinates via the
+   * PIXI stage transform, then snaps to the nearest grid centre.
+   *
+   * @param {string} label  Shown in a notification while awaiting placement.
    * @returns {Promise<{x: number, y: number}|null>}
    */
-  static async _showCrosshair(label, iconUrl) {
-    const portal = game.modules.get('portal-lib');
-    if (!portal?.active) {
-      ui.notifications.error('GBCommanderBanner | Portal (portal-lib) is required for banner placement.');
-      return null;
-    }
+  static _showCrosshair(label) {
+    return new Promise((resolve) => {
+      ui.notifications.info(`${label} — click on the canvas to place, or press Escape to cancel.`);
+      document.body.style.cursor = 'crosshair';
 
-    try {
-      // portal-lib CrossHairs static API — https://github.com/theripper93/portal-lib
-      const crosshairs = await portal.api.CrossHairs.show({
-        size:        1,
-        label,
-        icon:        iconUrl,
-        drawOutline: true,
-        drawIcon:    !!iconUrl,
-        fillColor:   0x2d7d32,
-        fillAlpha:   0.15,
-        strokeColor: 0x2d7d32
-      });
-      if (!crosshairs || crosshairs.cancelled) return null;
-      return { x: crosshairs.x, y: crosshairs.y };
-    } catch (err) {
-      console.error('GBCommanderBanner | Portal crosshair error:', err);
-      return null;
-    }
+      const canvasEl = canvas.app.canvas;
+
+      const onClick = (event) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+
+        // Screen → world coordinates via the PIXI stage transform.
+        const rect        = canvasEl.getBoundingClientRect();
+        const screenPoint = new PIXI.Point(event.clientX - rect.left, event.clientY - rect.top);
+        const worldPoint  = canvas.stage.toLocal(screenPoint);
+
+        // Snap to nearest grid centre.
+        const snapped = canvas.grid.getSnappedPoint(worldPoint, {
+          mode: CONST.GRID_SNAPPING_MODES.CENTER
+        });
+
+        cleanup();
+        resolve(snapped);
+      };
+
+      const onKeyDown = (event) => {
+        if (event.key !== 'Escape') return;
+        cleanup();
+        resolve(null);
+      };
+
+      const cleanup = () => {
+        document.body.style.cursor = '';
+        canvasEl.removeEventListener('click', onClick);
+        document.removeEventListener('keydown', onKeyDown);
+      };
+
+      canvasEl.addEventListener('click', onClick);
+      document.addEventListener('keydown', onKeyDown);
+    });
   }
 
   /**
@@ -946,6 +983,62 @@ class GBCommanderBanner {
     }]);
 
     ui.notifications.info(`${commanderToken.name}'s banner has been planted.`);
+  }
+
+  /**
+   * Post-spawn initialization called after Portal places the banner token.
+   * Sets our identifying flags on the token and drops the 30ft aura template.
+   * Runs on the GM directly, or via socket when triggered by a non-GM player.
+   *
+   * @param {string} bannerTokenId
+   * @param {string} commanderTokenId
+   * @param {string} commanderActorId
+   * @param {number} tempHP
+   */
+  static async _initializeBannerToken(bannerTokenId, commanderTokenId, commanderActorId, tempHP) {
+    const bannerTokenDoc = canvas.scene.tokens.get(bannerTokenId);
+    if (!bannerTokenDoc) {
+      console.warn('GBCommanderBanner | Spawned banner token not found on scene:', bannerTokenId);
+      return;
+    }
+
+    const commanderName = canvas.tokens.get(commanderTokenId)?.name ?? 'Commander';
+
+    // Rename and flag the Portal-spawned token.
+    await bannerTokenDoc.update({
+      name: `${commanderName}'s Banner`,
+      flags: {
+        [GBToolbelt.MODULE_ID]: {
+          [GBCommanderBanner.BANNER_TOKEN_FLAG]: true,
+          commanderActorId,
+          commanderTokenId,
+          tempHP
+        }
+      }
+    });
+
+    // Centre the 30ft aura template on the token.
+    const cx = bannerTokenDoc.x + canvas.grid.size / 2;
+    const cy = bannerTokenDoc.y + canvas.grid.size / 2;
+
+    await canvas.scene.createEmbeddedDocuments('MeasuredTemplate', [{
+      t:           'circle',
+      x:           cx,
+      y:           cy,
+      distance:    GBCommanderBanner.BANNER_RANGE_FEET,
+      borderColor: '#2d7d32',
+      fillColor:   '#2d7d32',
+      fillAlpha:   0.05,
+      flags: {
+        [GBToolbelt.MODULE_ID]: {
+          [GBCommanderBanner.BANNER_TEMPLATE_FLAG]: true,
+          commanderActorId,
+          bannerTokenId
+        }
+      }
+    }]);
+
+    ui.notifications.info(`${commanderName}'s banner has been planted!`);
   }
 
   // ── Cleanup ───────────────────────────────────────────────────────────────
