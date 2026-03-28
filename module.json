@@ -6,6 +6,7 @@
     "minimum": "13",
     "verified": "13"
   },
+  "socket": true,
   "esmodules": [
     "scripts/toolbelt.js"
   ],
@@ -18,6 +19,11 @@
         "id": "portal-lib",
         "type": "module",
         "reason": "Required for the Place Banner token placement UI (Plant Banner feat, Phase 2)."
+      },
+      {
+        "id": "socketlib",
+        "type": "module",
+        "reason": "Required for GM-escalated banner token initialization when a non-GM player places a banner."
       }
     ]
   },

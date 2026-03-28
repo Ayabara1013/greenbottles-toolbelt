@@ -432,8 +432,40 @@ class GBCommanderBanner {
   static BANNER_ACTOR_FOLDER  = "Greenbottle's Toolbelt";
   static BANNER_ICON          = 'icons/sundries/flags/banner-flag-yellow-red.webp';
 
+  /** @type {object|null} socketlib socket handle, set on init if socketlib is active. */
+  static _socket = null;
+
   static initialize() {
     GBCommanderBanner._registerSettings();
+
+    console.log('GBCommanderBanner | initialize() called');
+    console.log('GBCommanderBanner | typeof socketlib:', typeof socketlib);
+    console.log('GBCommanderBanner | socketlib value:', typeof socketlib !== 'undefined' ? socketlib : 'N/A');
+    console.log('GBCommanderBanner | socketlib.registerModule:', typeof socketlib !== 'undefined' ? typeof socketlib.registerModule : 'N/A');
+
+    // Register socketlib socket.
+    if (typeof socketlib !== 'undefined' && typeof socketlib.registerModule === 'function') {
+      GBCommanderBanner._socket = socketlib.registerModule(GBToolbelt.MODULE_ID);
+      console.log('GBCommanderBanner | _socket after registerModule:', GBCommanderBanner._socket);
+      GBCommanderBanner._socket.register('commanderBanner.apply', data => {
+        const token = canvas.tokens.get(data.tokenId);
+        if (token) GBCommanderBanner._applyToAllies(token, data.tempHP);
+      });
+      GBCommanderBanner._socket.register('commanderBanner.initialize', data => {
+        return GBCommanderBanner._initializeBannerToken(
+          data.bannerTokenId, data.commanderTokenId, data.commanderActorId, data.tempHP
+        );
+      });
+      GBCommanderBanner._socket.register('commanderBanner.cleanup', () => {
+        const tokens = canvas.tokens.placeables.filter(t =>
+          t.document.flags?.[GBToolbelt.MODULE_ID]?.[GBCommanderBanner.BANNER_TOKEN_FLAG]
+        );
+        return GBCommanderBanner._cleanupBannerTokens(tokens);
+      });
+      console.log('GBCommanderBanner | socketlib handlers registered OK');
+    } else {
+      console.warn('GBCommanderBanner | socketlib NOT available — skipping socket registration');
+    }
 
     // Fires at the start of each combatant's turn — check if it's a commander.
     Hooks.on('pf2e.startTurn', combatant => GBCommanderBanner._onTurnStart(combatant));
@@ -452,27 +484,9 @@ class GBCommanderBanner {
 
       // Ensure the "Commander's Banner" world actor exists on first load.
       GBCommanderBanner._ensureBannerActor();
-
-      // Socket listeners — non-GM clients route GM-privileged actions here.
-      game.socket.on('module.greenbottles-toolbelt', data => {
-        if (data.action === 'commanderBanner.apply') {
-          const token = canvas.tokens.get(data.tokenId);
-          if (token) GBCommanderBanner._applyToAllies(token, data.tempHP);
-
-        } else if (data.action === 'commanderBanner.initialize') {
-          GBCommanderBanner._initializeBannerToken(
-            data.bannerTokenId, data.commanderTokenId, data.commanderActorId, data.tempHP
-          );
-
-        } else if (data.action === 'commanderBanner.cleanup') {
-          const tokens = canvas.tokens.placeables.filter(t =>
-            t.document.flags?.[GBToolbelt.MODULE_ID]?.[GBCommanderBanner.BANNER_TOKEN_FLAG]
-          );
-          GBCommanderBanner._cleanupBannerTokens(tokens);
-        }
-      });
     });
 
+    console.log('GBCommanderBanner | _socket final value:', GBCommanderBanner._socket);
     console.log("Greenbottle's Toolbelt | Commander Banner initialized");
   }
 
@@ -619,10 +633,8 @@ class GBCommanderBanner {
 
       if (game.user.isGM) {
         await GBCommanderBanner._applyToAllies(token, tempHP);
-      } else {
-        game.socket.emit('module.greenbottles-toolbelt', {
-          action: 'commanderBanner.apply', tokenId, tempHP
-        });
+      } else if (GBCommanderBanner._socket) {
+        await GBCommanderBanner._socket.executeAsGM('commanderBanner.apply', { tokenId, tempHP });
       }
 
       await message.setFlag(GBToolbelt.MODULE_ID, 'applied', true);
@@ -652,8 +664,8 @@ class GBCommanderBanner {
           t.document.flags?.[GBToolbelt.MODULE_ID]?.[GBCommanderBanner.BANNER_TOKEN_FLAG]
         );
         await GBCommanderBanner._cleanupBannerTokens(tokens);
-      } else {
-        game.socket.emit('module.greenbottles-toolbelt', { action: 'commanderBanner.cleanup' });
+      } else if (GBCommanderBanner._socket) {
+        await GBCommanderBanner._socket.executeAsGM('commanderBanner.cleanup');
       }
 
       await message.setFlag(GBToolbelt.MODULE_ID, 'applied', true);
@@ -755,7 +767,12 @@ class GBCommanderBanner {
    * @param {Token|null} commanderToken  Defaults to the first controlled canvas token.
    */
   static async placeBanner(commanderToken = null) {
+    console.log('GBCommanderBanner | placeBanner() called');
+    console.log('GBCommanderBanner | _socket:', GBCommanderBanner._socket);
+    console.log('GBCommanderBanner | controlled tokens:', canvas.tokens.controlled);
+
     commanderToken ??= canvas.tokens.controlled[0] ?? null;
+    console.log('GBCommanderBanner | commanderToken:', commanderToken);
 
     if (!commanderToken) {
       ui.notifications.warn('GBCommanderBanner | Select your commander token before placing a banner.');
@@ -769,6 +786,11 @@ class GBCommanderBanner {
 
     if (typeof Portal === 'undefined') {
       ui.notifications.error('GBCommanderBanner | Portal (portal-lib) must be active for banner placement.');
+      return;
+    }
+
+    if (!GBCommanderBanner._socket) {
+      ui.notifications.error('GBCommanderBanner | socketlib must be active for banner placement.');
       return;
     }
 
@@ -795,30 +817,22 @@ class GBCommanderBanner {
     const level  = commanderToken.actor.system.details.level.value;
     const tempHP = GBCommanderBanner.calcTempHP(level);
 
-    // Portal: show placement cursor then spawn. Portal handles GM escalation internally.
+    // Portal: show placement cursor then spawn.
     const portal = new Portal()
       .addCreature(bannerActor.uuid)
       .origin(commanderToken);
 
     await portal.pick();
-    const spawned = await portal.spawn();
-    const spawnedToken = spawned?.[0] ?? null;
+    const [spawnedToken] = await portal.spawn();
     if (!spawnedToken) return;
 
-    // Flag the token and create the aura template (requires GM permission).
-    if (game.user.isGM) {
-      await GBCommanderBanner._initializeBannerToken(
-        spawnedToken.id, commanderToken.id, commanderToken.actor.id, tempHP
-      );
-    } else {
-      game.socket.emit('module.greenbottles-toolbelt', {
-        action:           'commanderBanner.initialize',
-        bannerTokenId:    spawnedToken.id,
-        commanderTokenId: commanderToken.id,
-        commanderActorId: commanderToken.actor.id,
-        tempHP
-      });
-    }
+    // Flag the token and create the aura template via socketlib (GM-escalated).
+    await GBCommanderBanner._socket.executeAsGM('commanderBanner.initialize', {
+      bannerTokenId:    spawnedToken.id,
+      commanderTokenId: commanderToken.id,
+      commanderActorId: commanderToken.actor.id,
+      tempHP
+    });
   }
 
   // ── Banner Token / Template ────────────────────────────────────────────────
