@@ -438,15 +438,9 @@ class GBCommanderBanner {
   static initialize() {
     GBCommanderBanner._registerSettings();
 
-    console.log('GBCommanderBanner | initialize() called');
-    console.log('GBCommanderBanner | typeof socketlib:', typeof socketlib);
-    console.log('GBCommanderBanner | socketlib value:', typeof socketlib !== 'undefined' ? socketlib : 'N/A');
-    console.log('GBCommanderBanner | socketlib.registerModule:', typeof socketlib !== 'undefined' ? typeof socketlib.registerModule : 'N/A');
-
     // Register socketlib socket.
     if (typeof socketlib !== 'undefined' && typeof socketlib.registerModule === 'function') {
       GBCommanderBanner._socket = socketlib.registerModule(GBToolbelt.MODULE_ID);
-      console.log('GBCommanderBanner | _socket after registerModule:', GBCommanderBanner._socket);
       GBCommanderBanner._socket.register('commanderBanner.apply', data => {
         const token = canvas.tokens.get(data.tokenId);
         if (token) GBCommanderBanner._applyToAllies(token, data.tempHP);
@@ -462,9 +456,6 @@ class GBCommanderBanner {
         );
         return GBCommanderBanner._cleanupBannerTokens(tokens);
       });
-      console.log('GBCommanderBanner | socketlib handlers registered OK');
-    } else {
-      console.warn('GBCommanderBanner | socketlib NOT available — skipping socket registration');
     }
 
     // Fires at the start of each combatant's turn — check if it's a commander.
@@ -479,6 +470,15 @@ class GBCommanderBanner {
       GBCommanderBanner._onCombatEnd();
     });
 
+    // Move the aura template when a banner token is moved.
+    Hooks.on('updateToken', (tokenDoc, change) => {
+      if (!game.user.isGM) return;
+      if (!('x' in change || 'y' in change)) return;
+      const f = tokenDoc.flags?.[GBToolbelt.MODULE_ID];
+      if (!f?.[GBCommanderBanner.BANNER_TOKEN_FLAG]) return;
+      GBCommanderBanner._syncAuraToToken(tokenDoc);
+    });
+
     Hooks.once('ready', () => {
       if (!game.user.isGM) return;
 
@@ -486,7 +486,6 @@ class GBCommanderBanner {
       GBCommanderBanner._ensureBannerActor();
     });
 
-    console.log('GBCommanderBanner | _socket final value:', GBCommanderBanner._socket);
     console.log("Greenbottle's Toolbelt | Commander Banner initialized");
   }
 
@@ -767,12 +766,7 @@ class GBCommanderBanner {
    * @param {Token|null} commanderToken  Defaults to the first controlled canvas token.
    */
   static async placeBanner(commanderToken = null) {
-    console.log('GBCommanderBanner | placeBanner() called');
-    console.log('GBCommanderBanner | _socket:', GBCommanderBanner._socket);
-    console.log('GBCommanderBanner | controlled tokens:', canvas.tokens.controlled);
-
     commanderToken ??= canvas.tokens.controlled[0] ?? null;
-    console.log('GBCommanderBanner | commanderToken:', commanderToken);
 
     if (!commanderToken) {
       ui.notifications.warn('GBCommanderBanner | Select your commander token before placing a banner.');
@@ -1053,6 +1047,22 @@ class GBCommanderBanner {
     }]);
 
     ui.notifications.info(`${commanderName}'s banner has been planted!`);
+  }
+
+  /**
+   * Moves the linked aura template to follow a banner token after it is moved.
+   * @param {TokenDocument} bannerTokenDoc
+   */
+  static async _syncAuraToToken(bannerTokenDoc) {
+    const template = canvas.templates.placeables.find(t => {
+      const f = t.document.flags?.[GBToolbelt.MODULE_ID];
+      return f?.[GBCommanderBanner.BANNER_TEMPLATE_FLAG] && f.bannerTokenId === bannerTokenDoc.id;
+    });
+    if (!template) return;
+
+    const cx = bannerTokenDoc.x + canvas.grid.size / 2;
+    const cy = bannerTokenDoc.y + canvas.grid.size / 2;
+    await template.document.update({ x: cx, y: cy });
   }
 
   // ── Cleanup ───────────────────────────────────────────────────────────────
