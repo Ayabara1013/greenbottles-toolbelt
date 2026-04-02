@@ -740,12 +740,13 @@ class GBCommanderBanner {
       if (updated) {
         const change = prev > 0 ? `${prev} → ${next}` : `${next}`;
         lines.push(`<li><b>${allied.name}</b><br>has gained ${change} temp HP</li>`);
-        ui.notifications.info(`${allied.name}: ${change} temp HP (Plant Banner)`);
+        console.log(`GBCommanderBanner |   ${allied.name}: ${change} temp HP granted`);
       } else {
         const alreadyMsg = prev > tempHP
           ? `has more than ${tempHP} temp HP (${prev})`
           : `already has ${prev} temp HP`;
         lines.push(`<li><b>${allied.name}</b><br>${alreadyMsg}</li>`);
+        console.log(`GBCommanderBanner |   ${allied.name}: ${alreadyMsg}`);
       }
     }
 
@@ -753,8 +754,7 @@ class GBCommanderBanner {
 
     ChatMessage.create({
       content: `<h3>⚑ Plant Banner — ${sourceLabel} (${tempHP} temp HP)</h3>`
-        + `<ul style="margin:0.25em 0; padding-left:1.25em">${lines.join('')}</ul>`,
-      whisper: ChatMessage.getWhisperRecipients('GM')
+        + `<ul style="margin:0.25em 0; padding-left:1.25em">${lines.join('')}</ul>`
     });
   }
 
