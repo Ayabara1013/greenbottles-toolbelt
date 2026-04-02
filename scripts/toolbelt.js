@@ -459,7 +459,11 @@ class GBCommanderBanner {
     }
 
     // Fires at the start of each combatant's turn — check if it's a commander.
-    Hooks.on('pf2e.startTurn', combatant => GBCommanderBanner._onTurnStart(combatant));
+    Hooks.on('pf2e.startTurn', combatant => {
+      console.log('GBCommanderBanner | pf2e.startTurn hook triggered');
+      GBCommanderBanner._onTurnStart(combatant);
+    });
+    console.log("GBCommanderBanner | pf2e.startTurn hook registered");
 
     // Re-bind chat card buttons whenever a banner card is rendered/re-rendered.
     Hooks.on('renderChatMessage', (message, html) => GBCommanderBanner._bindChatCard(message, html));
@@ -497,7 +501,7 @@ class GBCommanderBanner {
       hint: 'When enabled, a clickable chat card appears at the start of the '
         + "commander's turn instead of automatically applying temp HP. "
         + "The GM and the commander's player can click it to apply.",
-      scope: 'world',
+      scope: 'client',
       config: true,
       type: Boolean,
       default: false
@@ -508,7 +512,7 @@ class GBCommanderBanner {
       hint: 'When enabled, planted banner tokens and their aura templates are '
         + 'automatically removed when combat ends. When disabled, a Retrieve '
         + 'button appears in GM chat.',
-      scope: 'world',
+      scope: 'client',
       config: true,
       type: Boolean,
       default: false
@@ -525,10 +529,22 @@ class GBCommanderBanner {
    * @param {CombatantPF2e} combatant
    */
   static _onTurnStart(combatant) {
-    if (!game.user.isGM) return;
+    console.log('GBCommanderBanner | pf2e.startTurn hook fired for:', combatant.name, '| isGM:', game.user.isGM);
+
+    if (!game.user.isGM) {
+      console.log('GBCommanderBanner | Non-GM player, skipping');
+      return;
+    }
 
     const actor = combatant.actor;
-    if (!actor || !GBCommanderBanner.isCommanderWithBanner(actor)) return;
+    if (!actor) {
+      console.warn('GBCommanderBanner | No actor found for combatant:', combatant.name);
+      return;
+    }
+
+    const hasCommander = GBCommanderBanner.isCommanderWithBanner(actor);
+    console.log('GBCommanderBanner | Actor:', actor.name, '| Has Commander + Plant Banner:', hasCommander);
+    if (!hasCommander) return;
 
     const commanderToken = canvas.tokens.get(combatant.tokenId) ?? combatant.token?.object;
     if (!commanderToken) {
@@ -539,13 +555,20 @@ class GBCommanderBanner {
     // Shift origin to the planted banner if one is deployed for this commander.
     const bannerToken = GBCommanderBanner._findBannerTokenForCommander(actor.id);
     const originToken = bannerToken ?? commanderToken;
+    console.log('GBCommanderBanner | Using origin:', originToken.name, '| Banner deployed:', !!bannerToken);
 
     const level  = actor.system.details.level.value;
     const tempHP = GBCommanderBanner.calcTempHP(level);
+    console.log('GBCommanderBanner | Level:', level, '| Calculated temp HP:', tempHP);
 
-    if (game.settings.get(GBToolbelt.MODULE_ID, 'bannerHPChatCard')) {
+    const useChatCard = game.settings.get(GBToolbelt.MODULE_ID, 'bannerHPChatCard');
+    console.log('GBCommanderBanner | Using chat card:', useChatCard);
+
+    if (useChatCard) {
+      console.log('GBCommanderBanner | Posting chat card...');
       GBCommanderBanner._postChatCard(originToken, tempHP, commanderToken);
     } else {
+      console.log('GBCommanderBanner | Applying banner HP automatically...');
       GBCommanderBanner._applyToAllies(originToken, tempHP, commanderToken);
     }
   }
@@ -683,6 +706,8 @@ class GBCommanderBanner {
    * @param {Token|null} commanderToken  Commander token for display label; null when it IS origin.
    */
   static async _applyToAllies(originToken, tempHP, commanderToken = null) {
+    console.log('GBCommanderBanner | _applyToAllies called with tempHP:', tempHP);
+
     const displayToken = commanderToken ?? originToken;
     const isBanner     = commanderToken !== null && originToken !== commanderToken;
     const sourceLabel  = isBanner
@@ -690,16 +715,27 @@ class GBCommanderBanner {
       : displayToken.name;
 
     const alliedTokens = GBCommanderBanner.findAlliedTokens();
+    console.log('GBCommanderBanner | Found allied tokens:', alliedTokens.length);
     const lines = [];
 
     for (const allied of alliedTokens) {
+      console.log('GBCommanderBanner | Processing ally:', allied.name);
+
       // Skip the banner token itself — it shouldn't receive temp HP.
-      if (allied.document.flags?.[GBToolbelt.MODULE_ID]?.[GBCommanderBanner.BANNER_TOKEN_FLAG]) continue;
+      if (allied.document.flags?.[GBToolbelt.MODULE_ID]?.[GBCommanderBanner.BANNER_TOKEN_FLAG]) {
+        console.log('GBCommanderBanner |   Skipping: is a banner token');
+        continue;
+      }
 
       const dist = GBCommanderBanner.getDistanceFeet(originToken, allied);
-      if (dist > GBCommanderBanner.BANNER_RANGE_FEET) continue;
+      console.log('GBCommanderBanner |   Distance from origin:', dist, 'feet');
+      if (dist > GBCommanderBanner.BANNER_RANGE_FEET) {
+        console.log('GBCommanderBanner |   Skipping: out of range (max 30ft)');
+        continue;
+      }
 
       const { updated, prev, next } = await GBCommanderBanner.applyTempHP(allied.actor, tempHP);
+      console.log('GBCommanderBanner |   Applied temp HP - updated:', updated, '| prev:', prev, '| next:', next);
 
       if (updated) {
         const change = prev > 0 ? `${prev} → ${next}` : `${next}`;
