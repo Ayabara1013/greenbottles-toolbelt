@@ -1278,6 +1278,358 @@ class GBCommanderBanner {
 }
 
 
+// ════════════════════════════════════════════════════════════════════════════
+// GBToolbarFilter — Per-button, per-actor-type visibility control for actor
+//                   sheet header buttons injected by third-party modules.
+//
+// How it works:
+//   1. On every actor sheet open, the hook compares the live button list
+//      against the sheet's own _getHeaderButtons() baseline. Any button not
+//      in that baseline was added by a module and is tracked as "discovered".
+//   2. Discovered buttons are persisted in a hidden world setting so they
+//      survive reloads without needing every sheet to be reopened.
+//   3. The GM configures visibility via Module Settings → "Configure", which
+//      opens GBButtonFilterApp — a checkbox grid: rows = buttons, cols = actor
+//      types. Rules are saved as { [buttonClass]: string[] } (allowed types).
+//   4. On each sheet open the filter splices out buttons whose class has a
+//      rule that excludes the current actor type. No rule = show everywhere.
+//
+// Settings (world-scope, GM-restricted):
+//   toolbarFilterEnabled  (visible) — master on/off switch.
+//   discoveredButtons     (hidden)  — { [class]: { label, icon } }
+//   buttonVisibilityRules (hidden)  — { [class]: string[] } allowed actor types.
+// ════════════════════════════════════════════════════════════════════════════
+
+class GBButtonFilterApp extends FormApplication {
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      title: 'Toolbar Button Visibility',
+      id: 'gb-button-filter-config',
+      classes: ['form'],
+      width: 700,
+      resizable: true,
+      // Placeholder — _renderInner is fully overridden and never fetches this.
+      template: 'modules/greenbottles-toolbelt/templates/DOES_NOT_EXIST.html'
+    });
+  }
+
+  async _renderInner() {
+    try {
+      const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons') ?? {};
+      const rules      = game.settings.get(GBToolbelt.MODULE_ID, 'buttonVisibilityRules') ?? {};
+      const types      = GBToolbarFilter.actorTypes();
+      return $(GBButtonFilterApp._buildHTML(discovered, rules, types));
+    } catch(err) {
+      console.error('GBButtonFilterApp | Failed to render:', err);
+      return $(`<div><p style="color:red;padding:1em">Error rendering dialog — see console.</p></div>`);
+    }
+  }
+
+  activateListeners(html) {
+    super.activateListeners(html);
+    html.find('button[name="gb-save"]').on('click', async ev => {
+      ev.preventDefault();
+      await this._updateObject(ev, null);
+      this.close();
+    });
+  }
+
+  static _buildHTML(discovered, rules, types) {
+    // Filter out native Foundry/system buttons that were accidentally stored.
+    const entries = Object.entries(discovered)
+      .filter(([cls]) => !GBToolbarFilter._NATIVE_CLASSES.has(cls));
+
+    if (entries.length === 0) {
+      return `<div style="padding:1em">
+        <p>No module-added buttons discovered yet.<br>
+           Open a few actor sheets with your modules active, then re-open this dialog.</p>
+      </div>`;
+    }
+
+    const typeHeaders = types.map(t => {
+      const label = game.i18n.localize(CONFIG.Actor.typeLabels?.[t] ?? t);
+      return `<th style="text-align:center;padding:4px 8px" title="${t}">${label}</th>`;
+    }).join('');
+
+    const rows = entries.map(([cls, info]) => {
+      const allowed = rules[cls] ?? types; // no rule = visible for all types
+      const cells = types.map(type => `
+        <td style="text-align:center">
+          <input type="checkbox"
+                 data-btn-class="${cls}"
+                 data-actor-type="${type}"
+                 ${allowed.includes(type) ? 'checked' : ''}>
+        </td>`).join('');
+      return `<tr>
+        <td style="padding:4px 8px;white-space:nowrap">
+          <i class="${info.icon ?? ''}"></i> ${info.label ?? cls}
+          <div style="font-size:0.7em;opacity:0.55">${cls}</div>
+        </td>
+        ${cells}
+      </tr>`;
+    }).join('');
+
+    // NOTE: No <form> wrapper here — FormApplication supplies the outer <form>
+    // already. Nesting a second <form> breaks submit detection.
+    return `<div>
+      <p style="margin:0 0 0.5em;font-size:0.85em;opacity:0.75">
+        Check the actor types each button should be visible on. Unchecked = hidden for that type.
+      </p>
+      <div style="overflow:auto;max-height:440px">
+        <table style="width:100%;border-collapse:collapse">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:4px 8px;position:sticky;top:0;background:var(--color-bg)">Button</th>
+              ${typeHeaders.replace(/<th /g, '<th style="text-align:center;padding:4px 8px;position:sticky;top:0;background:var(--color-bg)" ')}
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <footer class="sheet-footer flexrow" style="margin-top:0.5em">
+        <button type="button" name="gb-save"><i class="fas fa-save"></i> Save</button>
+      </footer>
+    </div>`;
+  }
+
+  async _updateObject(_event, _formData) {
+    const types      = GBToolbarFilter.actorTypes();
+    const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons') ?? {};
+    const rules      = {};
+
+    // Read directly from the DOM — checkboxes use data attributes, not name fields.
+    const checkboxes = this.element[0].querySelectorAll('input[type="checkbox"]');
+    const typesByClass = {};
+    for (const cb of checkboxes) {
+      const cls  = cb.dataset.btnClass;
+      const type = cb.dataset.actorType;
+      if (!cls || !type) continue;
+      if (!typesByClass[cls]) typesByClass[cls] = [];
+      if (cb.checked) typesByClass[cls].push(type);
+    }
+
+    for (const cls of Object.keys(discovered)) {
+      const visible = typesByClass[cls] ?? [];
+      // Only persist a rule when it differs from "show everywhere".
+      if (visible.length < types.length) rules[cls] = visible;
+    }
+
+    await game.settings.set(GBToolbelt.MODULE_ID, 'buttonVisibilityRules', rules);
+    ui.notifications.info("Greenbottle's Toolbelt | Button visibility saved.");
+  }
+}
+
+
+class GBToolbarFilter {
+  static initialize() {
+    GBToolbarFilter._registerSettings();
+
+    // Catches buttons added via the Foundry hook API (e.g. Effects Halo).
+    GBToolbarFilter._hookHandler = (sheet, buttons) => GBToolbarFilter._onButtons(sheet, buttons);
+    Hooks.on('getActorSheetHeaderButtons', GBToolbarFilter._hookHandler);
+
+    // Catches buttons injected directly into the DOM after render (e.g. Magaambya Helper).
+    GBToolbarFilter._renderHandler = (app, _html) => GBToolbarFilter._onRender(app);
+    Hooks.on('renderActorSheet', GBToolbarFilter._renderHandler);
+
+    // Expose on window for console debugging: GBToolbarFilter.debug()
+    window.GBToolbarFilter = GBToolbarFilter;
+  }
+
+  /** All actor types for the current game system, excluding internal base types. */
+  static actorTypes() {
+    let types = game.system?.documentTypes?.Actor;
+    if (!types) {
+      types = Object.keys(CONFIG.Actor?.typeLabels ?? {});
+    } else if (types instanceof Set) {
+      types = [...types];
+    } else if (!Array.isArray(types)) {
+      types = Object.keys(types);
+    }
+    return types.filter(t => t !== 'base' && t !== '#base');
+  }
+
+  /**
+   * Call GBToolbarFilter.debug() from the browser console to dump a full
+   * diagnostic report: registration state, discovered buttons, rules, actor
+   * types, and whether GBButtonFilterApp can be instantiated.
+   */
+  static debug() {
+    console.group('GBToolbarFilter | Diagnostic Report');
+
+    console.log('FormApplication available:', typeof FormApplication !== 'undefined');
+    console.log('GBButtonFilterApp defined:', typeof GBButtonFilterApp !== 'undefined');
+    console.log('game.settings available:', typeof game?.settings !== 'undefined');
+
+    try {
+      const menus = game.settings.menus;
+      const menu  = menus?.get(`${GBToolbelt.MODULE_ID}.buttonFilterMenu`);
+      console.log('buttonFilterMenu registered:', !!menu, menu ?? '(not found)');
+    } catch(e) {
+      console.error('Error reading settings menus:', e);
+    }
+
+    try {
+      const enabled   = game.settings.get(GBToolbelt.MODULE_ID, 'toolbarFilterEnabled');
+      const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons');
+      const rules     = game.settings.get(GBToolbelt.MODULE_ID, 'buttonVisibilityRules');
+      console.log('toolbarFilterEnabled:', enabled);
+      console.log('discoveredButtons:', discovered);
+      console.log('buttonVisibilityRules:', rules);
+    } catch(e) {
+      console.error('Error reading settings values:', e);
+    }
+
+    console.log('actorTypes():', GBToolbarFilter.actorTypes());
+
+    try {
+      console.log('Attempting to instantiate GBButtonFilterApp...');
+      const app = new GBButtonFilterApp({}, {});
+      console.log('GBButtonFilterApp instantiated OK:', app);
+      console.log('  .template:', app.template);
+      console.log('  .options:', app.options);
+    } catch(e) {
+      console.error('GBButtonFilterApp instantiation failed:', e);
+    }
+
+    console.groupEnd();
+  }
+
+  static _registerSettings() {
+    try {
+      game.settings.registerMenu(GBToolbelt.MODULE_ID, 'buttonFilterMenu', {
+        name: 'Toolbar Button Visibility',
+        label: 'Configure',
+        hint: 'Choose which toolbar buttons appear on each actor type.',
+        icon: 'fas fa-filter',
+        type: GBButtonFilterApp,
+        restricted: true
+      });
+    } catch(e) {
+      console.error('GBToolbarFilter | registerMenu FAILED:', e);
+    }
+
+    game.settings.register(GBToolbelt.MODULE_ID, 'toolbarFilterEnabled', {
+      name: 'Toolbar Filter: Enabled',
+      hint: 'Applies the per-button visibility rules configured via the button above. '
+        + 'Disable to show all buttons everywhere regardless of rules.',
+      scope: 'world',
+      config: true,
+      type: Boolean,
+      default: true
+    });
+
+    game.settings.register(GBToolbelt.MODULE_ID, 'discoveredButtons', {
+      scope: 'world', config: false, type: Object, default: {}
+    });
+
+    game.settings.register(GBToolbelt.MODULE_ID, 'buttonVisibilityRules', {
+      scope: 'world', config: false, type: Object, default: {}
+    });
+  }
+
+  static _onButtons(sheet, buttons) {
+    try {
+      GBToolbarFilter._discover(buttons);
+      // Defer DOM scan to after the full render cycle — catches buttons that other
+      // modules inject via renderActorSheet or equivalent (e.g. Magaambya Helper).
+      setTimeout(() => GBToolbarFilter._onRender(sheet), 0);
+      if (game.settings.get(GBToolbelt.MODULE_ID, 'toolbarFilterEnabled')) {
+        GBToolbarFilter._apply(sheet.actor?.type, buttons);
+      }
+    } catch(err) {
+      // Log once and disable to avoid flooding the console.
+      if (!GBToolbarFilter._hookErrorLogged) {
+        GBToolbarFilter._hookErrorLogged = true;
+        console.error('GBToolbarFilter | _onButtons threw (hook disabled to prevent flood):', err);
+        Hooks.off('getActorSheetHeaderButtons', GBToolbarFilter._hookHandler);
+      }
+    }
+  }
+
+  /** Handles renderActorSheet — discovers and filters DOM-injected buttons. */
+  static _onRender(app) {
+    try {
+      if (!app.actor) return;
+      GBToolbarFilter._discoverFromDOM(app);
+      if (game.settings.get(GBToolbelt.MODULE_ID, 'toolbarFilterEnabled')) {
+        GBToolbarFilter._filterDOM(app);
+      }
+    } catch(err) {
+      console.error('GBToolbarFilter | _onRender error:', err);
+    }
+  }
+
+  /** Scans the rendered header DOM and records any unknown module buttons. */
+  static _discoverFromDOM(app) {
+    const header = app.element?.[0]?.querySelector('.window-header');
+    if (!header) return;
+    const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons') ?? {};
+    let changed = false;
+    for (const el of header.querySelectorAll('a.header-button')) {
+      const cls = [...el.classList].find(c => c !== 'header-button' && c !== 'control');
+      if (!cls || GBToolbarFilter._NATIVE_CLASSES.has(cls) || discovered[cls]) continue;
+      discovered[cls] = {
+        label: el.textContent.trim(),
+        icon: el.querySelector('i')?.className ?? ''
+      };
+      changed = true;
+    }
+    if (changed) game.settings.set(GBToolbelt.MODULE_ID, 'discoveredButtons', discovered);
+  }
+
+  /** Removes header buttons from the DOM that are filtered for this actor type. */
+  static _filterDOM(app) {
+    const rules = game.settings.get(GBToolbelt.MODULE_ID, 'buttonVisibilityRules') ?? {};
+    const actorType = app.actor?.type;
+    if (!actorType) return;
+    const header = app.element?.[0]?.querySelector('.window-header');
+    if (!header) return;
+    for (const el of header.querySelectorAll('a.header-button')) {
+      const cls = [...el.classList].find(c => c !== 'header-button' && c !== 'control');
+      if (!cls) continue;
+      const rule = rules[cls];
+      if (rule && !rule.includes(actorType)) el.remove();
+    }
+  }
+
+  // Known native Foundry/PF2e button classes to exclude from discovery.
+  // NOTE: 'popout' is intentionally omitted — on PF2e v14 ApplicationV2 sheets
+  // the real popout is AppV2 chrome (never reaches this hook), so 'popout' in
+  // the hook means a module button (e.g. Magaambya Helper uses it as its class).
+  static _NATIVE_CLASSES = new Set([
+    'close', 'configure-sheet', 'configure-token', 'configure-creature', 'import',
+  ]);
+
+  /**
+   * Saves any newly-seen buttons to the persistent discovered setting.
+   * Skips native Foundry/system buttons — only module-added buttons are tracked.
+   */
+  static _discover(buttons) {
+    const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons') ?? {};
+    let changed = false;
+    for (const btn of buttons) {
+      if (!btn.class || GBToolbarFilter._NATIVE_CLASSES.has(btn.class) || discovered[btn.class]) continue;
+      discovered[btn.class] = { label: btn.label ?? btn.class, icon: btn.icon ?? '' };
+      changed = true;
+    }
+    if (changed) game.settings.set(GBToolbelt.MODULE_ID, 'discoveredButtons', discovered);
+  }
+
+  /** Removes buttons that the rules say shouldn't appear for this actor type. */
+  static _apply(actorType, buttons) {
+    if (!actorType) return;
+    const rules = game.settings.get(GBToolbelt.MODULE_ID, 'buttonVisibilityRules') ?? {};
+    for (let i = buttons.length - 1; i >= 0; i--) {
+      const btn = buttons[i];
+      if (!btn.class) continue;
+      const rule = rules[btn.class];
+      if (rule && !rule.includes(actorType)) buttons.splice(i, 1);
+    }
+  }
+}
+
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 Hooks.once('init', () => {
@@ -1289,4 +1641,5 @@ Hooks.once('init', () => {
   GBToolbelt.initialize();
   GBHeroPoints.initialize();
   GBCommanderBanner.initialize();
+  GBToolbarFilter.initialize();
 });
