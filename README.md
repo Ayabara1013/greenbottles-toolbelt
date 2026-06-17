@@ -49,7 +49,7 @@ All modules are installable via Foundry Package Manager (search by name) or by p
 
 **Repo:** [greenbottles-toolbelt](https://github.com/Ayabara1013/greenbottles-toolbelt) | **v1.4.0**
 
-Shared utility library for all Greenbottle's modules. Also includes several GM-facing features: hero point management, Plant Banner automation, actor sheet toolbar filtering, and SF2e spell/feat automation (Elemental Weapon, Runesmith).
+Shared utility library for all Greenbottle's modules. Also includes several GM-facing features: hero point management, Plant Banner automation, and actor sheet toolbar button visibility filtering.
 
 ### Using the API
 
@@ -154,28 +154,6 @@ Buttons are auto-discovered: the filter watches `getActorSheetHeaderButtons` for
 | Toolbar Filter: Enabled | World | Master switch — disable to show all buttons regardless of rules |
 | Toolbar Button Visibility → Configure | World, GM only | Opens the checkbox grid dialog |
 
-### GBElementalWeapon
-
-Automation for the SF2e **Elemental Weapon** focus spell.
-
-On cast, prompts the caster to choose an element (Air/Earth/Fire/Metal/Water/Wood). Derives weapon grade and item level from the spell rank, creates a real weapon item in the caster's inventory with the correct damage type and traits, and attaches a spell effect. When the effect expires or is dismissed, the weapon is removed automatically.
-
-```js
-const api = game.modules.get('greenbottles-toolbelt')?.api;
-await api.elementalWeapon.cast();
-```
-
-### GBRunesmith
-
-Automation for the SF2e **Runesmith** extempore rune inscription feat.
-
-Reads base runes and diacritics (identified by the `diacritic` trait) from the Runesmith's inventory. A persistent UI lets the player pick a base rune and optional diacritic; the combined rule elements are applied to the target weapon as a single effect. Includes setup and invocation macros in the `macros/` folder.
-
-```js
-const api = game.modules.get('greenbottles-toolbelt')?.api;
-await api.runesmith.manageRunes();  // open the rune selection UI
-```
-
 ### Declaring as a Dependency
 
 In your module's `module.json`:
@@ -185,7 +163,7 @@ In your module's `module.json`:
     {
       "id": "greenbottles-toolbelt",
       "type": "module",
-      "compatibility": { "minimum": "1.4.0" }
+      "compatibility": { "minimum": "1.3.0" }
     }
   ]
 }
@@ -195,7 +173,7 @@ In your module's `module.json`:
 
 | Version | Changes |
 |---------|---------|
-| 1.4.0 | GBToolbarFilter — per-button per-actor-type header button visibility. GBElementalWeapon — Elemental Weapon focus spell automation. GBRunesmith — Runesmith extempore rune inscription automation. SF2e anachronism v2 icon migration macro. |
+| 1.4.0 | GBToolbarFilter — per-button per-actor-type header button visibility. SF2e anachronism v2 icon migration macro. |
 | 1.3.0 | GBCommanderBanner — Plant Banner feat automation with aura template, auto temp HP, and chat card. socketlib integration for non-GM banner placement. |
 | 1.1.0 | Absorbed `greenbottles-toolbelt__hero-points` (deprecated). `GBHeroPoints` class now lives here. |
 | 1.0.0 | Initial release: `GBToolbelt` shared utility library |
