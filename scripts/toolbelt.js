@@ -387,11 +387,1259 @@ class GBHeroPoints {
 }
 
 
+// ════════════════════════════════════════════════════════════════════════════
+// GBCommanderBanner — Automated Plant Banner temp HP for PF2e
+//
+// The Plant Banner feat (Commander 1, Battlecry! pg. 30) grants temporary HP
+// to all allies within 30 feet of the banner at the start of each of the
+// commander's turns. This class automates that via the pf2e.startTurn hook.
+//
+// Phase 1 — Automation:
+//   Fires on pf2e.startTurn. If the combatant has the Commander class (or
+//   Commander Dedication archetype) and the Plant Banner feat, temp HP is
+//   applied to all FRIENDLY tokens within 30 feet of the burst origin.
+//
+// Phase 2 — Planted Banner Token:
+//   Call GBToolbelt.commanderBanner.placeBanner() (or the place-banner macro)
+//   to use a Portal crosshair and plant a physical banner token on the scene.
+//   While a banner token is deployed for a commander, the burst origin shifts
+//   from the commander's position to the banner's position. A 30ft circle
+//   template is placed alongside the token to visualise the aura. When combat
+//   ends the GM is prompted to retrieve the banner (or it auto-cleans up if
+//   the bannerAutoCleanup setting is enabled).
+//
+// Temp HP granted: 4 at level 1, +4 at 4th level and every 4 levels after.
+//   Level 1–3: 4 | 4–7: 8 | 8–11: 12 | 12–15: 16 | 16–19: 20 | 20: 24
+//
+// Settings:
+//   bannerHPChatCard   (default: false) — post a chat card prompt instead of
+//                      auto-applying. Visible to GM + commander's player.
+//   bannerAutoCleanup  (default: false) — auto-delete banner tokens on combat
+//                      end. When false a Retrieve button appears in chat.
+//
+// Manual usage (outside combat, from a hotbar macro):
+//   const api = game.modules.get('greenbottles-toolbelt')?.api;
+//   await api.commanderBanner.applyBannerHP();   // apply HP now
+//   await api.commanderBanner.placeBanner();     // open placement cursor
+// ════════════════════════════════════════════════════════════════════════════
+
+class GBCommanderBanner {
+  static BANNER_RANGE_FEET    = 30;
+  static BANNER_ACTOR_FLAG    = 'isBannerActor';
+  static BANNER_TOKEN_FLAG    = 'isBannerToken';
+  static BANNER_TEMPLATE_FLAG = 'isBannerTemplate';
+  static BANNER_ACTOR_NAME    = "Commander's Banner";
+  static BANNER_ACTOR_FOLDER  = "Greenbottle's Toolbelt";
+  static BANNER_ICON          = 'icons/sundries/flags/banner-flag-yellow-red.webp';
+
+  /** @type {object|null} socketlib socket handle, set on init if socketlib is active. */
+  static _socket = null;
+
+  static initialize() {
+    GBCommanderBanner._registerSettings();
+
+    // Register socketlib socket.
+    if (typeof socketlib !== 'undefined' && typeof socketlib.registerModule === 'function') {
+      GBCommanderBanner._socket = socketlib.registerModule(GBToolbelt.MODULE_ID);
+      GBCommanderBanner._socket.register('commanderBanner.apply', data => {
+        const token = canvas.tokens.get(data.tokenId);
+        if (token) GBCommanderBanner._applyToAllies(token, data.tempHP);
+      });
+      GBCommanderBanner._socket.register('commanderBanner.initialize', data => {
+        return GBCommanderBanner._initializeBannerToken(
+          data.bannerTokenId, data.commanderTokenId, data.commanderActorId, data.tempHP
+        );
+      });
+      GBCommanderBanner._socket.register('commanderBanner.cleanup', () => {
+        const tokens = canvas.tokens.placeables.filter(t =>
+          t.document.flags?.[GBToolbelt.MODULE_ID]?.[GBCommanderBanner.BANNER_TOKEN_FLAG]
+        );
+        return GBCommanderBanner._cleanupBannerTokens(tokens);
+      });
+    }
+
+    // Fires at the start of each combatant's turn — check if it's a commander.
+    Hooks.on('pf2e.startTurn', combatant => {
+      console.log('GBCommanderBanner | pf2e.startTurn hook triggered');
+      GBCommanderBanner._onTurnStart(combatant);
+    });
+    console.log("GBCommanderBanner | pf2e.startTurn hook registered");
+
+    // Re-bind chat card buttons whenever a banner card is rendered/re-rendered.
+    Hooks.on('renderChatMessage', (message, html) => GBCommanderBanner._bindChatCard(message, html));
+
+    // Post-combat banner cleanup.
+    Hooks.on('deleteCombat', () => {
+      if (!game.user.isGM) return;
+      GBCommanderBanner._onCombatEnd();
+    });
+
+    // Move the aura template when a banner token is moved.
+    Hooks.on('updateToken', (tokenDoc, change) => {
+      if (!game.user.isGM) return;
+      if (!('x' in change || 'y' in change)) return;
+      const f = tokenDoc.flags?.[GBToolbelt.MODULE_ID];
+      if (!f?.[GBCommanderBanner.BANNER_TOKEN_FLAG]) return;
+      GBCommanderBanner._syncAuraToToken(tokenDoc);
+    });
+
+    Hooks.once('ready', () => {
+      if (!game.user.isGM) return;
+
+      // Ensure the "Commander's Banner" world actor exists on first load.
+      GBCommanderBanner._ensureBannerActor();
+    });
+
+    console.log("Greenbottle's Toolbelt | Commander Banner initialized");
+  }
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+
+  static _registerSettings() {
+    game.settings.register(GBToolbelt.MODULE_ID, 'bannerHPChatCard', {
+      name: 'Plant Banner: Use Chat Card Prompt',
+      hint: 'When enabled, a clickable chat card appears at the start of the '
+        + "commander's turn instead of automatically applying temp HP. "
+        + "The GM and the commander's player can click it to apply.",
+      scope: 'client',
+      config: true,
+      type: Boolean,
+      default: false
+    });
+
+    game.settings.register(GBToolbelt.MODULE_ID, 'bannerAutoCleanup', {
+      name: 'Plant Banner: Auto-Retrieve on Combat End',
+      hint: 'When enabled, planted banner tokens and their aura templates are '
+        + 'automatically removed when combat ends. When disabled, a Retrieve '
+        + 'button appears in GM chat.',
+      scope: 'client',
+      config: true,
+      type: Boolean,
+      default: false
+    });
+  }
+
+  // ── Hook Handlers ─────────────────────────────────────────────────────────
+
+  /**
+   * Called on pf2e.startTurn. Only the GM processes this to avoid duplicate
+   * writes — the GM always has permission to update all actors.
+   * If a planted banner token exists for this commander it is used as the
+   * burst origin instead of the commander's current position.
+   * @param {CombatantPF2e} combatant
+   */
+  static _onTurnStart(combatant) {
+    console.log('GBCommanderBanner | pf2e.startTurn hook fired for:', combatant.name, '| isGM:', game.user.isGM);
+
+    if (!game.user.isGM) {
+      console.log('GBCommanderBanner | Non-GM player, skipping');
+      return;
+    }
+
+    const actor = combatant.actor;
+    if (!actor) {
+      console.warn('GBCommanderBanner | No actor found for combatant:', combatant.name);
+      return;
+    }
+
+    const hasCommander = GBCommanderBanner.isCommanderWithBanner(actor);
+    console.log('GBCommanderBanner | Actor:', actor.name, '| Has Commander + Plant Banner:', hasCommander);
+    if (!hasCommander) return;
+
+    const commanderToken = canvas.tokens.get(combatant.tokenId) ?? combatant.token?.object;
+    if (!commanderToken) {
+      console.warn('GBCommanderBanner | Token not found on canvas for:', combatant.name);
+      return;
+    }
+
+    // Shift origin to the planted banner if one is deployed for this commander.
+    const bannerToken = GBCommanderBanner._findBannerTokenForCommander(actor.id);
+    const originToken = bannerToken ?? commanderToken;
+    console.log('GBCommanderBanner | Using origin:', originToken.name, '| Banner deployed:', !!bannerToken);
+
+    const level  = actor.system.details.level.value;
+    const tempHP = GBCommanderBanner.calcTempHP(level);
+    console.log('GBCommanderBanner | Level:', level, '| Calculated temp HP:', tempHP);
+
+    const useChatCard = game.settings.get(GBToolbelt.MODULE_ID, 'bannerHPChatCard');
+    console.log('GBCommanderBanner | Using chat card:', useChatCard);
+
+    if (useChatCard) {
+      console.log('GBCommanderBanner | Posting chat card...');
+      GBCommanderBanner._postChatCard(originToken, tempHP, commanderToken);
+    } else {
+      console.log('GBCommanderBanner | Applying banner HP automatically...');
+      GBCommanderBanner._applyToAllies(originToken, tempHP, commanderToken);
+    }
+  }
+
+  // ── Chat Cards ────────────────────────────────────────────────────────────
+
+  /**
+   * Posts a whispered chat card with an Apply button.
+   * Recipients: all GMs + the non-GM owner of the commander actor (if any).
+   * @param {Token}      originToken     Burst origin (planted banner or commander).
+   * @param {number}     tempHP
+   * @param {Token|null} commanderToken  Commander token for display; null when it IS the origin.
+   */
+  static async _postChatCard(originToken, tempHP, commanderToken = null) {
+    const displayToken = commanderToken ?? originToken;
+    const actor        = displayToken.actor;
+    const isBanner     = commanderToken !== null && originToken !== commanderToken;
+
+    const owner   = game.users.find(u => !u.isGM && actor.testUserPermission(u, 'OWNER'));
+    const whisper = [
+      ...ChatMessage.getWhisperRecipients('GM'),
+      ...(owner ? [owner] : [])
+    ];
+
+    await ChatMessage.create({
+      content: `
+        <div class="gb-banner-card">
+          <h3>⚑ Plant Banner — ${actor.name}</h3>
+          <p>Grants <strong>${tempHP} temporary HP</strong> to allies within 30 feet${isBanner ? ' of the planted banner' : ''}.</p>
+          <button data-action="gb-apply-banner-hp"
+                  data-token-id="${originToken.id}"
+                  data-temp-hp="${tempHP}">
+            Apply Banner HP
+          </button>
+        </div>`,
+      speaker: ChatMessage.getSpeaker({ actor }),
+      whisper,
+      flags: {
+        [GBToolbelt.MODULE_ID]: { bannerCard: true, tokenId: originToken.id, tempHP }
+      }
+    });
+  }
+
+  /**
+   * Routes renderChatMessage to the appropriate button binder.
+   * @param {ChatMessage} message
+   * @param {jQuery}      html
+   */
+  static _bindChatCard(message, html) {
+    const flags = message.flags?.[GBToolbelt.MODULE_ID];
+    if (!flags) return;
+    if (flags.bannerCard)  GBCommanderBanner._bindApplyButton(message, html, flags);
+    if (flags.cleanupCard) GBCommanderBanner._bindCleanupButton(message, html, flags);
+  }
+
+  /**
+   * Binds the "Apply Banner HP" button on a banner chat card.
+   * GM clicks apply directly; non-GM clicks route through the socket.
+   */
+  static _bindApplyButton(message, html, flags) {
+    const btn = html[0].querySelector('[data-action="gb-apply-banner-hp"]');
+    if (!btn) return;
+
+    if (flags.applied) {
+      btn.disabled = true;
+      btn.textContent = 'Applied ✓';
+      return;
+    }
+
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Applying…';
+
+      const tokenId = btn.dataset.tokenId;
+      const tempHP  = Number(btn.dataset.tempHp);
+      const token   = canvas.tokens.get(tokenId);
+
+      if (!token) {
+        ui.notifications.warn('GBCommanderBanner | Origin token not found on scene.');
+        btn.disabled = false;
+        btn.textContent = 'Apply Banner HP';
+        return;
+      }
+
+      if (game.user.isGM) {
+        await GBCommanderBanner._applyToAllies(token, tempHP);
+      } else if (GBCommanderBanner._socket) {
+        await GBCommanderBanner._socket.executeAsGM('commanderBanner.apply', { tokenId, tempHP });
+      }
+
+      await message.setFlag(GBToolbelt.MODULE_ID, 'applied', true);
+      btn.textContent = 'Applied ✓';
+    });
+  }
+
+  /**
+   * Binds the "Retrieve Banners" button on the post-combat cleanup card.
+   */
+  static _bindCleanupButton(message, html, flags) {
+    const btn = html[0].querySelector('[data-action="gb-retrieve-banners"]');
+    if (!btn) return;
+
+    if (flags.applied) {
+      btn.disabled = true;
+      btn.textContent = 'Retrieved ✓';
+      return;
+    }
+
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Retrieving…';
+
+      if (game.user.isGM) {
+        const tokens = canvas.tokens.placeables.filter(t =>
+          t.document.flags?.[GBToolbelt.MODULE_ID]?.[GBCommanderBanner.BANNER_TOKEN_FLAG]
+        );
+        await GBCommanderBanner._cleanupBannerTokens(tokens);
+      } else if (GBCommanderBanner._socket) {
+        await GBCommanderBanner._socket.executeAsGM('commanderBanner.cleanup');
+      }
+
+      await message.setFlag(GBToolbelt.MODULE_ID, 'applied', true);
+      btn.textContent = 'Retrieved ✓';
+    });
+  }
+
+  // ── Application ───────────────────────────────────────────────────────────
+
+  /**
+   * Grants temp HP to all FRIENDLY tokens within the banner burst radius
+   * of the origin token. Banner tokens themselves are excluded.
+   * Posts a GM-only summary to chat and shows a toast for each updated actor.
+   * @param {Token}      originToken     Burst origin (planted banner or commander).
+   * @param {number}     tempHP
+   * @param {Token|null} commanderToken  Commander token for display label; null when it IS origin.
+   */
+  static async _applyToAllies(originToken, tempHP, commanderToken = null) {
+    console.log('GBCommanderBanner | _applyToAllies called with tempHP:', tempHP);
+
+    const displayToken = commanderToken ?? originToken;
+    const isBanner     = commanderToken !== null && originToken !== commanderToken;
+    const sourceLabel  = isBanner
+      ? `${displayToken.name}'s planted banner`
+      : displayToken.name;
+
+    const alliedTokens = GBCommanderBanner.findAlliedTokens();
+    console.log('GBCommanderBanner | Found allied tokens:', alliedTokens.length);
+    const lines = [];
+
+    for (const allied of alliedTokens) {
+      console.log('GBCommanderBanner | Processing ally:', allied.name);
+
+      // Skip the banner token itself — it shouldn't receive temp HP.
+      if (allied.document.flags?.[GBToolbelt.MODULE_ID]?.[GBCommanderBanner.BANNER_TOKEN_FLAG]) {
+        console.log('GBCommanderBanner |   Skipping: is a banner token');
+        continue;
+      }
+
+      const dist = GBCommanderBanner.getDistanceFeet(originToken, allied);
+      console.log('GBCommanderBanner |   Distance from origin:', dist, 'feet');
+      if (dist > GBCommanderBanner.BANNER_RANGE_FEET) {
+        console.log('GBCommanderBanner |   Skipping: out of range (max 30ft)');
+        continue;
+      }
+
+      const { updated, prev, next } = await GBCommanderBanner.applyTempHP(allied.actor, tempHP);
+      console.log('GBCommanderBanner |   Applied temp HP - updated:', updated, '| prev:', prev, '| next:', next);
+
+      if (updated) {
+        const change = prev > 0 ? `${prev} → ${next}` : `${next}`;
+        lines.push(`<li><b>${allied.name}</b><br>has gained ${change} temp HP</li>`);
+        console.log(`GBCommanderBanner |   ${allied.name}: ${change} temp HP granted`);
+      } else {
+        const alreadyMsg = prev > tempHP
+          ? `has more than ${tempHP} temp HP (${prev})`
+          : `already has ${prev} temp HP`;
+        lines.push(`<li><b>${allied.name}</b><br>${alreadyMsg}</li>`);
+        console.log(`GBCommanderBanner |   ${allied.name}: ${alreadyMsg}`);
+      }
+    }
+
+    if (lines.length === 0) lines.push('<li><em>No allies in range.</em></li>');
+
+    ChatMessage.create({
+      content: `<h3>⚑ Plant Banner — ${sourceLabel} (${tempHP} temp HP)</h3>`
+        + `<ul style="margin:0.25em 0; padding-left:1.25em">${lines.join('')}</ul>`
+    });
+  }
+
+  // ── Public API ────────────────────────────────────────────────────────────
+
+  /**
+   * Manually scan the scene for commanders and apply banner HP.
+   * Respects the bannerHPChatCard setting and any planted banner tokens.
+   * Useful outside of active combat (e.g. from a hotbar macro).
+   */
+  static async applyBannerHP() {
+    if (!canvas.scene) return ui.notifications.warn('GBCommanderBanner | No active scene.');
+
+    const commanderTokens = GBCommanderBanner.findBannerTokens();
+    if (commanderTokens.length === 0) {
+      return ui.notifications.warn(
+        'No tokens with Commander class/archetype and Plant Banner found on this scene.'
+      );
+    }
+
+    const useChatCard = game.settings.get(GBToolbelt.MODULE_ID, 'bannerHPChatCard');
+    for (const commanderToken of commanderTokens) {
+      const level       = commanderToken.actor.system.details.level.value;
+      const tempHP      = GBCommanderBanner.calcTempHP(level);
+      const bannerToken = GBCommanderBanner._findBannerTokenForCommander(commanderToken.actor.id);
+      const originToken = bannerToken ?? commanderToken;
+      const passCommander = bannerToken ? commanderToken : null;
+
+      if (useChatCard) {
+        await GBCommanderBanner._postChatCard(originToken, tempHP, passCommander);
+      } else {
+        await GBCommanderBanner._applyToAllies(originToken, tempHP, passCommander);
+      }
+    }
+  }
+
+  /**
+   * Open a Portal placement cursor to plant a Commander's Banner token on the scene.
+   * Uses Portal's builder API: new Portal().addCreature().origin().pick().spawn()
+   * Portal handles GM permission escalation internally via socketlib.
+   *
+   * After spawn, flags the token and drops the 30ft aura template.
+   * Select your commander token on the canvas before calling, or pass it directly.
+   *
+   * @param {Token|null} commanderToken  Defaults to the first controlled canvas token.
+   */
+  static async placeBanner(commanderToken = null) {
+    commanderToken ??= canvas.tokens.controlled[0] ?? null;
+
+    if (!commanderToken) {
+      ui.notifications.warn('GBCommanderBanner | Select your commander token before placing a banner.');
+      return;
+    }
+
+    if (!GBCommanderBanner.isCommanderWithBanner(commanderToken.actor)) {
+      ui.notifications.warn(`GBCommanderBanner | ${commanderToken.name} does not have Plant Banner.`);
+      return;
+    }
+
+    if (typeof Portal === 'undefined') {
+      ui.notifications.error('GBCommanderBanner | Portal (portal-lib) must be active for banner placement.');
+      return;
+    }
+
+    if (!GBCommanderBanner._socket) {
+      ui.notifications.error('GBCommanderBanner | socketlib must be active for banner placement.');
+      return;
+    }
+
+    // If a banner is already planted, offer to replace it.
+    const existing = GBCommanderBanner._findBannerTokenForCommander(commanderToken.actor.id);
+    if (existing) {
+      const replace = await Dialog.confirm({
+        title: 'Banner Already Planted',
+        content: `<p>${commanderToken.name} already has a banner deployed. Replace it?</p>`
+      });
+      if (!replace) return;
+      await GBCommanderBanner._cleanupBannerForCommander(commanderToken.actor.id);
+    }
+
+    // The banner actor is created on the GM's ready hook — find it now.
+    const bannerActor = game.actors.find(a =>
+      a.getFlag(GBToolbelt.MODULE_ID, GBCommanderBanner.BANNER_ACTOR_FLAG) === true
+    );
+    if (!bannerActor) {
+      ui.notifications.error('GBCommanderBanner | Banner actor not found. Ask your GM to reload the module.');
+      return;
+    }
+
+    const level  = commanderToken.actor.system.details.level.value;
+    const tempHP = GBCommanderBanner.calcTempHP(level);
+
+    // Portal: show placement cursor then spawn.
+    const portal = new Portal()
+      .addCreature(bannerActor.uuid)
+      .origin(commanderToken);
+
+    await portal.pick();
+    const [spawnedToken] = await portal.spawn();
+    if (!spawnedToken) return;
+
+    // Flag the token and create the aura template via socketlib (GM-escalated).
+    await GBCommanderBanner._socket.executeAsGM('commanderBanner.initialize', {
+      bannerTokenId:    spawnedToken.id,
+      commanderTokenId: commanderToken.id,
+      commanderActorId: commanderToken.actor.id,
+      tempHP
+    });
+  }
+
+  // ── Banner Token / Template ────────────────────────────────────────────────
+
+  /**
+   * Shows a native canvas placement cursor and returns the grid-snapped
+   * centre of the clicked cell, or null if the user presses Escape.
+   *
+   * Works without any external dependencies — listens for a single left-click
+   * on the HTML canvas element, converts screen → world coordinates via the
+   * PIXI stage transform, then snaps to the nearest grid centre.
+   *
+   * @param {string} label  Shown in a notification while awaiting placement.
+   * @returns {Promise<{x: number, y: number}|null>}
+   */
+  static _showCrosshair(label) {
+    return new Promise((resolve) => {
+      ui.notifications.info(`${label} — click on the canvas to place, or press Escape to cancel.`);
+      document.body.style.cursor = 'crosshair';
+
+      const canvasEl = canvas.app.canvas;
+
+      const onClick = (event) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+
+        // Screen → world coordinates via the PIXI stage transform.
+        const rect        = canvasEl.getBoundingClientRect();
+        const screenPoint = new PIXI.Point(event.clientX - rect.left, event.clientY - rect.top);
+        const worldPoint  = canvas.stage.toLocal(screenPoint);
+
+        // Snap to nearest grid centre.
+        const snapped = canvas.grid.getSnappedPoint(worldPoint, {
+          mode: CONST.GRID_SNAPPING_MODES.CENTER
+        });
+
+        cleanup();
+        resolve(snapped);
+      };
+
+      const onKeyDown = (event) => {
+        if (event.key !== 'Escape') return;
+        cleanup();
+        resolve(null);
+      };
+
+      const cleanup = () => {
+        document.body.style.cursor = '';
+        canvasEl.removeEventListener('click', onClick);
+        document.removeEventListener('keydown', onKeyDown);
+      };
+
+      canvasEl.addEventListener('click', onClick);
+      document.addEventListener('keydown', onKeyDown);
+    });
+  }
+
+  /**
+   * Ensures the "Commander's Banner" world actor exists; creates it if not.
+   * Placed in a "Greenbottle's Toolbelt" folder and flagged for future lookup.
+   * Called once on the GM's ready hook — safe to call multiple times.
+   * @returns {Promise<Actor>}
+   */
+  static async _ensureBannerActor() {
+    let actor = game.actors.find(a =>
+      a.getFlag(GBToolbelt.MODULE_ID, GBCommanderBanner.BANNER_ACTOR_FLAG) === true
+    );
+    if (actor) return actor;
+
+    let folder = game.folders.find(f =>
+      f.name === GBCommanderBanner.BANNER_ACTOR_FOLDER && f.type === 'Actor'
+    );
+    if (!folder) {
+      folder = await Folder.create({
+        name:  GBCommanderBanner.BANNER_ACTOR_FOLDER,
+        type:  'Actor',
+        color: '#2d7d32',
+        flags: { [GBToolbelt.MODULE_ID]: { moduleFolder: true } }
+      });
+    }
+
+    actor = await Actor.create({
+      name:   GBCommanderBanner.BANNER_ACTOR_NAME,
+      type:   'npc',
+      img:    GBCommanderBanner.BANNER_ICON,
+      folder: folder.id,
+      flags:  { [GBToolbelt.MODULE_ID]: { [GBCommanderBanner.BANNER_ACTOR_FLAG]: true } },
+      prototypeToken: {
+        name:        GBCommanderBanner.BANNER_ACTOR_NAME,
+        width:       1,
+        height:      1,
+        disposition: CONST.TOKEN_DISPOSITIONS.FRIENDLY,
+        displayName: CONST.TOKEN_DISPLAY_MODES.ALWAYS,
+        actorLink:   false,
+        texture:     { src: GBCommanderBanner.BANNER_ICON }
+      }
+    });
+
+    console.log("GBCommanderBanner | Created banner actor in world.");
+    return actor;
+  }
+
+  /**
+   * Places a banner token and a linked 30ft circle aura template on the scene.
+   * Both are flagged so they can be found and cleaned up later.
+   * @param {string} commanderTokenId
+   * @param {number} x      Centre x in pixels (from Portal crosshair).
+   * @param {number} y      Centre y in pixels (from Portal crosshair).
+   * @param {number} tempHP
+   */
+  static async _createBannerTokenAndTemplate(commanderTokenId, x, y, tempHP) {
+    const commanderToken = canvas.tokens.get(commanderTokenId);
+    if (!commanderToken) {
+      console.warn('GBCommanderBanner | Commander token not found for banner placement:', commanderTokenId);
+      return;
+    }
+
+    const bannerActor = await GBCommanderBanner._ensureBannerActor();
+    if (!bannerActor) return;
+
+    const gs               = canvas.grid.size;
+    const commanderActorId = commanderToken.actor.id;
+
+    // Token x/y is the top-left corner; centre it on the crosshair position.
+    const [tokenDoc] = await canvas.scene.createEmbeddedDocuments('Token', [{
+      name:        `${commanderToken.name}'s Banner`,
+      actorId:     bannerActor.id,
+      actorLink:   false,
+      x:           x - (gs / 2),
+      y:           y - (gs / 2),
+      width:       1,
+      height:      1,
+      disposition: CONST.TOKEN_DISPOSITIONS.FRIENDLY,
+      displayName: CONST.TOKEN_DISPLAY_MODES.ALWAYS,
+      texture:     { src: GBCommanderBanner.BANNER_ICON },
+      flags: {
+        [GBToolbelt.MODULE_ID]: {
+          [GBCommanderBanner.BANNER_TOKEN_FLAG]: true,
+          commanderActorId,
+          commanderTokenId,
+          tempHP
+        }
+      }
+    }]);
+
+    // MeasuredTemplate x/y is the origin (centre for circles).
+    await canvas.scene.createEmbeddedDocuments('MeasuredTemplate', [{
+      t:           'circle',
+      x,
+      y,
+      distance:    GBCommanderBanner.BANNER_RANGE_FEET,
+      borderColor: '#2d7d32',
+      fillColor:   '#2d7d32',
+      fillAlpha:   0.05,
+      flags: {
+        [GBToolbelt.MODULE_ID]: {
+          [GBCommanderBanner.BANNER_TEMPLATE_FLAG]: true,
+          commanderActorId,
+          bannerTokenId: tokenDoc.id
+        }
+      }
+    }]);
+
+    ui.notifications.info(`${commanderToken.name}'s banner has been planted.`);
+  }
+
+  /**
+   * Post-spawn initialization called after Portal places the banner token.
+   * Sets our identifying flags on the token and drops the 30ft aura template.
+   * Runs on the GM directly, or via socket when triggered by a non-GM player.
+   *
+   * @param {string} bannerTokenId
+   * @param {string} commanderTokenId
+   * @param {string} commanderActorId
+   * @param {number} tempHP
+   */
+  static async _initializeBannerToken(bannerTokenId, commanderTokenId, commanderActorId, tempHP) {
+    const bannerTokenDoc = canvas.scene.tokens.get(bannerTokenId);
+    if (!bannerTokenDoc) {
+      console.warn('GBCommanderBanner | Spawned banner token not found on scene:', bannerTokenId);
+      return;
+    }
+
+    const commanderName = canvas.tokens.get(commanderTokenId)?.name ?? 'Commander';
+
+    // Rename and flag the Portal-spawned token.
+    await bannerTokenDoc.update({
+      name: `${commanderName}'s Banner`,
+      flags: {
+        [GBToolbelt.MODULE_ID]: {
+          [GBCommanderBanner.BANNER_TOKEN_FLAG]: true,
+          commanderActorId,
+          commanderTokenId,
+          tempHP
+        }
+      }
+    });
+
+    // Centre the 30ft aura template on the token.
+    const cx = bannerTokenDoc.x + canvas.grid.size / 2;
+    const cy = bannerTokenDoc.y + canvas.grid.size / 2;
+
+    await canvas.scene.createEmbeddedDocuments('MeasuredTemplate', [{
+      t:           'circle',
+      x:           cx,
+      y:           cy,
+      distance:    GBCommanderBanner.BANNER_RANGE_FEET,
+      borderColor: '#2d7d32',
+      fillColor:   '#2d7d32',
+      fillAlpha:   0.05,
+      flags: {
+        [GBToolbelt.MODULE_ID]: {
+          [GBCommanderBanner.BANNER_TEMPLATE_FLAG]: true,
+          commanderActorId,
+          bannerTokenId
+        }
+      }
+    }]);
+
+    ui.notifications.info(`${commanderName}'s banner has been planted!`);
+  }
+
+  /**
+   * Moves the linked aura template to follow a banner token after it is moved.
+   * @param {TokenDocument} bannerTokenDoc
+   */
+  static async _syncAuraToToken(bannerTokenDoc) {
+    const template = canvas.templates.placeables.find(t => {
+      const f = t.document.flags?.[GBToolbelt.MODULE_ID];
+      return f?.[GBCommanderBanner.BANNER_TEMPLATE_FLAG] && f.bannerTokenId === bannerTokenDoc.id;
+    });
+    if (!template) return;
+
+    const cx = bannerTokenDoc.x + canvas.grid.size / 2;
+    const cy = bannerTokenDoc.y + canvas.grid.size / 2;
+    await template.document.update({ x: cx, y: cy });
+  }
+
+  // ── Cleanup ───────────────────────────────────────────────────────────────
+
+  /**
+   * Called when combat is deleted (GM clicks End Combat).
+   * Either auto-removes banner tokens or posts a GM cleanup card.
+   */
+  static _onCombatEnd() {
+    if (!canvas.scene) return;
+
+    const bannerTokens = canvas.tokens.placeables.filter(t =>
+      t.document.flags?.[GBToolbelt.MODULE_ID]?.[GBCommanderBanner.BANNER_TOKEN_FLAG]
+    );
+    if (bannerTokens.length === 0) return;
+
+    if (game.settings.get(GBToolbelt.MODULE_ID, 'bannerAutoCleanup')) {
+      GBCommanderBanner._cleanupBannerTokens(bannerTokens);
+    } else {
+      GBCommanderBanner._postCleanupCard(bannerTokens);
+    }
+  }
+
+  /**
+   * Posts a GM-only chat card with a Retrieve button for post-combat cleanup.
+   * @param {Token[]} bannerTokens
+   */
+  static async _postCleanupCard(bannerTokens) {
+    const names  = bannerTokens.map(t => t.name).join(', ');
+    const plural = bannerTokens.length > 1;
+
+    await ChatMessage.create({
+      content: `
+        <div class="gb-banner-card">
+          <h3>⚑ Combat Ended — Banner${plural ? 's' : ''} Deployed</h3>
+          <p>${names} ${plural ? 'are' : 'is'} still planted on the field.</p>
+          <button data-action="gb-retrieve-banners">
+            Retrieve Banner${plural ? 's' : ''}
+          </button>
+        </div>`,
+      whisper: ChatMessage.getWhisperRecipients('GM'),
+      flags: { [GBToolbelt.MODULE_ID]: { cleanupCard: true } }
+    });
+  }
+
+  /**
+   * Deletes the given banner tokens and their linked aura templates from the scene.
+   * @param {Token[]} bannerTokens
+   */
+  static async _cleanupBannerTokens(bannerTokens) {
+    if (bannerTokens.length === 0) return;
+
+    const bannerTokenIds = new Set(bannerTokens.map(t => t.id));
+
+    // Remove the aura templates linked to these banner tokens.
+    const templateIds = canvas.templates.placeables
+      .filter(t => {
+        const f = t.document.flags?.[GBToolbelt.MODULE_ID];
+        return f?.[GBCommanderBanner.BANNER_TEMPLATE_FLAG] && bannerTokenIds.has(f.bannerTokenId);
+      })
+      .map(t => t.id);
+
+    if (templateIds.length > 0) {
+      await canvas.scene.deleteEmbeddedDocuments('MeasuredTemplate', templateIds);
+    }
+    await canvas.scene.deleteEmbeddedDocuments('Token', [...bannerTokenIds]);
+
+    ui.notifications.info(`Banner${bannerTokens.length > 1 ? 's' : ''} retrieved.`);
+  }
+
+  /**
+   * Deletes all banner tokens (and their templates) belonging to a specific commander.
+   * @param {string} commanderActorId
+   */
+  static async _cleanupBannerForCommander(commanderActorId) {
+    const tokens = canvas.tokens.placeables.filter(t => {
+      const f = t.document.flags?.[GBToolbelt.MODULE_ID];
+      return f?.[GBCommanderBanner.BANNER_TOKEN_FLAG] && f?.commanderActorId === commanderActorId;
+    });
+    await GBCommanderBanner._cleanupBannerTokens(tokens);
+  }
+
+  // ── Scene Queries ─────────────────────────────────────────────────────────
+
+  /**
+   * All tokens on the current scene that qualify as banner commanders.
+   * @returns {Token[]}
+   */
+  static findBannerTokens() {
+    return canvas.tokens.placeables.filter(t => GBCommanderBanner.isCommanderWithBanner(t.actor));
+  }
+
+  /**
+   * All FRIENDLY-disposition tokens on the current scene.
+   * @returns {Token[]}
+   */
+  static findAlliedTokens() {
+    return canvas.tokens.placeables.filter(t =>
+      t.document.disposition === CONST.TOKEN_DISPOSITIONS.FRIENDLY
+    );
+  }
+
+  /**
+   * Returns the planted banner token for the given commander actor, or null.
+   * @param {string} commanderActorId
+   * @returns {Token|null}
+   */
+  static _findBannerTokenForCommander(commanderActorId) {
+    return canvas.tokens.placeables.find(t => {
+      const f = t.document.flags?.[GBToolbelt.MODULE_ID];
+      return f?.[GBCommanderBanner.BANNER_TOKEN_FLAG] && f?.commanderActorId === commanderActorId;
+    }) ?? null;
+  }
+
+  // ── Feat / Class Detection ────────────────────────────────────────────────
+
+  static _hasCommanderClass(actor) {
+    return actor.itemTypes.class?.some(c => c.system.slug === 'commander') ?? false;
+  }
+
+  static _hasCommanderArchetype(actor) {
+    return actor.itemTypes.feat?.some(f => f.system.slug === 'commander-dedication') ?? false;
+  }
+
+  static _hasPlantBanner(actor) {
+    return actor.itemTypes.feat?.some(f => f.system.slug === 'plant-banner') ?? false;
+  }
+
+  /**
+   * Returns true if the actor qualifies as a banner commander:
+   * (Commander class OR Commander Dedication) AND Plant Banner feat.
+   * @param {Actor} actor
+   */
+  static isCommanderWithBanner(actor) {
+    if (!actor) return false;
+    const hasCommander = GBCommanderBanner._hasCommanderClass(actor)
+      || GBCommanderBanner._hasCommanderArchetype(actor);
+    return hasCommander && GBCommanderBanner._hasPlantBanner(actor);
+  }
+
+  // ── Math ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Temp HP formula for Plant Banner.
+   * 4 at level 1, +4 at 4th level and every 4 levels thereafter.
+   * Level 1–3: 4 | 4–7: 8 | 8–11: 12 | 12–15: 16 | 16–19: 20 | 20: 24
+   * @param {number} level
+   * @returns {number}
+   */
+  static calcTempHP(level) {
+    return 4 + Math.floor(level / 4) * 4;
+  }
+
+  /**
+   * Grid-based distance in feet between two token centres.
+   * @param {Token} tokenA
+   * @param {Token} tokenB
+   * @returns {number}
+   */
+  static getDistanceFeet(tokenA, tokenB) {
+    return canvas.grid.measureDistance(tokenA.center, tokenB.center, { gridSpaces: true });
+  }
+
+  /**
+   * Apply temp HP to an actor only if the new value exceeds what they have.
+   * PF2e temp HP does not stack — always take the highest.
+   * @param {Actor}  actor
+   * @param {number} tempHP
+   * @returns {Promise<{updated: boolean, prev: number, next: number}>}
+   */
+  static async applyTempHP(actor, tempHP) {
+    const prev = actor.system.attributes.hp?.temp ?? 0;
+    if (tempHP <= prev) return { updated: false, prev, next: prev };
+    await actor.update({ 'system.attributes.hp.temp': tempHP });
+    return { updated: true, prev, next: tempHP };
+  }
+}
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// GBToolbarFilter — Per-button, per-actor-type visibility control for actor
+//                   sheet header buttons injected by third-party modules.
+//
+// How it works:
+//   1. On every actor sheet open, the hook compares the live button list
+//      against the sheet's own _getHeaderButtons() baseline. Any button not
+//      in that baseline was added by a module and is tracked as "discovered".
+//   2. Discovered buttons are persisted in a hidden world setting so they
+//      survive reloads without needing every sheet to be reopened.
+//   3. The GM configures visibility via Module Settings → "Configure", which
+//      opens GBButtonFilterApp — a checkbox grid: rows = buttons, cols = actor
+//      types. Rules are saved as { [buttonClass]: string[] } (allowed types).
+//   4. On each sheet open the filter splices out buttons whose class has a
+//      rule that excludes the current actor type. No rule = show everywhere.
+//
+// Settings (world-scope, GM-restricted):
+//   toolbarFilterEnabled  (visible) — master on/off switch.
+//   discoveredButtons     (hidden)  — { [class]: { label, icon } }
+//   buttonVisibilityRules (hidden)  — { [class]: string[] } allowed actor types.
+// ════════════════════════════════════════════════════════════════════════════
+
+class GBButtonFilterApp extends FormApplication {
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      title: 'Toolbar Button Visibility',
+      id: 'gb-button-filter-config',
+      classes: ['form'],
+      width: 700,
+      resizable: true,
+      // Placeholder — _renderInner is fully overridden and never fetches this.
+      template: 'modules/greenbottles-toolbelt/templates/DOES_NOT_EXIST.html'
+    });
+  }
+
+  async _renderInner() {
+    try {
+      const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons') ?? {};
+      const rules      = game.settings.get(GBToolbelt.MODULE_ID, 'buttonVisibilityRules') ?? {};
+      const types      = GBToolbarFilter.actorTypes();
+      return $(GBButtonFilterApp._buildHTML(discovered, rules, types));
+    } catch(err) {
+      console.error('GBButtonFilterApp | Failed to render:', err);
+      return $(`<div><p style="color:red;padding:1em">Error rendering dialog — see console.</p></div>`);
+    }
+  }
+
+  activateListeners(html) {
+    super.activateListeners(html);
+    html.find('button[name="gb-save"]').on('click', async ev => {
+      ev.preventDefault();
+      await this._updateObject(ev, null);
+      this.close();
+    });
+  }
+
+  static _buildHTML(discovered, rules, types) {
+    // Filter out native Foundry/system buttons that were accidentally stored.
+    const entries = Object.entries(discovered)
+      .filter(([cls]) => !GBToolbarFilter._NATIVE_CLASSES.has(cls));
+
+    if (entries.length === 0) {
+      return `<div style="padding:1em">
+        <p>No module-added buttons discovered yet.<br>
+           Open a few actor sheets with your modules active, then re-open this dialog.</p>
+      </div>`;
+    }
+
+    const typeHeaders = types.map(t => {
+      const label = game.i18n.localize(CONFIG.Actor.typeLabels?.[t] ?? t);
+      return `<th style="text-align:center;padding:4px 8px" title="${t}">${label}</th>`;
+    }).join('');
+
+    const rows = entries.map(([cls, info]) => {
+      const allowed = rules[cls] ?? types; // no rule = visible for all types
+      const cells = types.map(type => `
+        <td style="text-align:center">
+          <input type="checkbox"
+                 data-btn-class="${cls}"
+                 data-actor-type="${type}"
+                 ${allowed.includes(type) ? 'checked' : ''}>
+        </td>`).join('');
+      return `<tr>
+        <td style="padding:4px 8px;white-space:nowrap">
+          <i class="${info.icon ?? ''}"></i> ${info.label ?? cls}
+          <div style="font-size:0.7em;opacity:0.55">${cls}</div>
+        </td>
+        ${cells}
+      </tr>`;
+    }).join('');
+
+    // NOTE: No <form> wrapper here — FormApplication supplies the outer <form>
+    // already. Nesting a second <form> breaks submit detection.
+    return `<div>
+      <p style="margin:0 0 0.5em;font-size:0.85em;opacity:0.75">
+        Check the actor types each button should be visible on. Unchecked = hidden for that type.
+      </p>
+      <div style="overflow:auto;max-height:440px">
+        <table style="width:100%;border-collapse:collapse">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:4px 8px;position:sticky;top:0;background:var(--color-bg)">Button</th>
+              ${typeHeaders.replace(/<th /g, '<th style="text-align:center;padding:4px 8px;position:sticky;top:0;background:var(--color-bg)" ')}
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <footer class="sheet-footer flexrow" style="margin-top:0.5em">
+        <button type="button" name="gb-save"><i class="fas fa-save"></i> Save</button>
+      </footer>
+    </div>`;
+  }
+
+  async _updateObject(_event, _formData) {
+    const types      = GBToolbarFilter.actorTypes();
+    const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons') ?? {};
+    const rules      = {};
+
+    // Read directly from the DOM — checkboxes use data attributes, not name fields.
+    const checkboxes = this.element[0].querySelectorAll('input[type="checkbox"]');
+    const typesByClass = {};
+    for (const cb of checkboxes) {
+      const cls  = cb.dataset.btnClass;
+      const type = cb.dataset.actorType;
+      if (!cls || !type) continue;
+      if (!typesByClass[cls]) typesByClass[cls] = [];
+      if (cb.checked) typesByClass[cls].push(type);
+    }
+
+    for (const cls of Object.keys(discovered)) {
+      const visible = typesByClass[cls] ?? [];
+      // Only persist a rule when it differs from "show everywhere".
+      if (visible.length < types.length) rules[cls] = visible;
+    }
+
+    await game.settings.set(GBToolbelt.MODULE_ID, 'buttonVisibilityRules', rules);
+    ui.notifications.info("Greenbottle's Toolbelt | Button visibility saved.");
+  }
+}
+
+
+class GBToolbarFilter {
+  static initialize() {
+    GBToolbarFilter._registerSettings();
+
+    // Catches buttons added via the Foundry hook API (e.g. Effects Halo).
+    GBToolbarFilter._hookHandler = (sheet, buttons) => GBToolbarFilter._onButtons(sheet, buttons);
+    Hooks.on('getActorSheetHeaderButtons', GBToolbarFilter._hookHandler);
+
+    // Catches buttons injected directly into the DOM after render (e.g. Magaambya Helper).
+    GBToolbarFilter._renderHandler = (app, _html) => GBToolbarFilter._onRender(app);
+    Hooks.on('renderActorSheet', GBToolbarFilter._renderHandler);
+
+    // Expose on window for console debugging: GBToolbarFilter.debug()
+    window.GBToolbarFilter = GBToolbarFilter;
+  }
+
+  /** All actor types for the current game system, excluding internal base types. */
+  static actorTypes() {
+    let types = game.system?.documentTypes?.Actor;
+    if (!types) {
+      types = Object.keys(CONFIG.Actor?.typeLabels ?? {});
+    } else if (types instanceof Set) {
+      types = [...types];
+    } else if (!Array.isArray(types)) {
+      types = Object.keys(types);
+    }
+    return types.filter(t => t !== 'base' && t !== '#base');
+  }
+
+  /**
+   * Call GBToolbarFilter.debug() from the browser console to dump a full
+   * diagnostic report: registration state, discovered buttons, rules, actor
+   * types, and whether GBButtonFilterApp can be instantiated.
+   */
+  static debug() {
+    console.group('GBToolbarFilter | Diagnostic Report');
+
+    console.log('FormApplication available:', typeof FormApplication !== 'undefined');
+    console.log('GBButtonFilterApp defined:', typeof GBButtonFilterApp !== 'undefined');
+    console.log('game.settings available:', typeof game?.settings !== 'undefined');
+
+    try {
+      const menus = game.settings.menus;
+      const menu  = menus?.get(`${GBToolbelt.MODULE_ID}.buttonFilterMenu`);
+      console.log('buttonFilterMenu registered:', !!menu, menu ?? '(not found)');
+    } catch(e) {
+      console.error('Error reading settings menus:', e);
+    }
+
+    try {
+      const enabled   = game.settings.get(GBToolbelt.MODULE_ID, 'toolbarFilterEnabled');
+      const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons');
+      const rules     = game.settings.get(GBToolbelt.MODULE_ID, 'buttonVisibilityRules');
+      console.log('toolbarFilterEnabled:', enabled);
+      console.log('discoveredButtons:', discovered);
+      console.log('buttonVisibilityRules:', rules);
+    } catch(e) {
+      console.error('Error reading settings values:', e);
+    }
+
+    console.log('actorTypes():', GBToolbarFilter.actorTypes());
+
+    try {
+      console.log('Attempting to instantiate GBButtonFilterApp...');
+      const app = new GBButtonFilterApp({}, {});
+      console.log('GBButtonFilterApp instantiated OK:', app);
+      console.log('  .template:', app.template);
+      console.log('  .options:', app.options);
+    } catch(e) {
+      console.error('GBButtonFilterApp instantiation failed:', e);
+    }
+
+    console.groupEnd();
+  }
+
+  static _registerSettings() {
+    try {
+      game.settings.registerMenu(GBToolbelt.MODULE_ID, 'buttonFilterMenu', {
+        name: 'Toolbar Button Visibility',
+        label: 'Configure',
+        hint: 'Choose which toolbar buttons appear on each actor type.',
+        icon: 'fas fa-filter',
+        type: GBButtonFilterApp,
+        restricted: true
+      });
+    } catch(e) {
+      console.error('GBToolbarFilter | registerMenu FAILED:', e);
+    }
+
+    game.settings.register(GBToolbelt.MODULE_ID, 'toolbarFilterEnabled', {
+      name: 'Toolbar Filter: Enabled',
+      hint: 'Applies the per-button visibility rules configured via the button above. '
+        + 'Disable to show all buttons everywhere regardless of rules.',
+      scope: 'world',
+      config: true,
+      type: Boolean,
+      default: true
+    });
+
+    game.settings.register(GBToolbelt.MODULE_ID, 'discoveredButtons', {
+      scope: 'world', config: false, type: Object, default: {}
+    });
+
+    game.settings.register(GBToolbelt.MODULE_ID, 'buttonVisibilityRules', {
+      scope: 'world', config: false, type: Object, default: {}
+    });
+  }
+
+  static _onButtons(sheet, buttons) {
+    try {
+      GBToolbarFilter._discover(buttons);
+      // Defer DOM scan to after the full render cycle — catches buttons that other
+      // modules inject via renderActorSheet or equivalent (e.g. Magaambya Helper).
+      setTimeout(() => GBToolbarFilter._onRender(sheet), 0);
+      if (game.settings.get(GBToolbelt.MODULE_ID, 'toolbarFilterEnabled')) {
+        GBToolbarFilter._apply(sheet.actor?.type, buttons);
+      }
+    } catch(err) {
+      // Log once and disable to avoid flooding the console.
+      if (!GBToolbarFilter._hookErrorLogged) {
+        GBToolbarFilter._hookErrorLogged = true;
+        console.error('GBToolbarFilter | _onButtons threw (hook disabled to prevent flood):', err);
+        Hooks.off('getActorSheetHeaderButtons', GBToolbarFilter._hookHandler);
+      }
+    }
+  }
+
+  /** Handles renderActorSheet — discovers and filters DOM-injected buttons. */
+  static _onRender(app) {
+    try {
+      if (!app.actor) return;
+      GBToolbarFilter._discoverFromDOM(app);
+      if (game.settings.get(GBToolbelt.MODULE_ID, 'toolbarFilterEnabled')) {
+        GBToolbarFilter._filterDOM(app);
+      }
+    } catch(err) {
+      console.error('GBToolbarFilter | _onRender error:', err);
+    }
+  }
+
+  /** Scans the rendered header DOM and records any unknown module buttons. */
+  static _discoverFromDOM(app) {
+    const header = app.element?.[0]?.querySelector('.window-header');
+    if (!header) return;
+    const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons') ?? {};
+    let changed = false;
+    for (const el of header.querySelectorAll('a.header-button')) {
+      const cls = [...el.classList].find(c => c !== 'header-button' && c !== 'control');
+      if (!cls || GBToolbarFilter._NATIVE_CLASSES.has(cls) || discovered[cls]) continue;
+      discovered[cls] = {
+        label: el.textContent.trim(),
+        icon: el.querySelector('i')?.className ?? ''
+      };
+      changed = true;
+    }
+    if (changed) game.settings.set(GBToolbelt.MODULE_ID, 'discoveredButtons', discovered);
+  }
+
+  /** Removes header buttons from the DOM that are filtered for this actor type. */
+  static _filterDOM(app) {
+    const rules = game.settings.get(GBToolbelt.MODULE_ID, 'buttonVisibilityRules') ?? {};
+    const actorType = app.actor?.type;
+    if (!actorType) return;
+    const header = app.element?.[0]?.querySelector('.window-header');
+    if (!header) return;
+    for (const el of header.querySelectorAll('a.header-button')) {
+      const cls = [...el.classList].find(c => c !== 'header-button' && c !== 'control');
+      if (!cls) continue;
+      const rule = rules[cls];
+      if (rule && !rule.includes(actorType)) el.remove();
+    }
+  }
+
+  // Known native Foundry/PF2e button classes to exclude from discovery.
+  // NOTE: 'popout' is intentionally omitted — on PF2e v14 ApplicationV2 sheets
+  // the real popout is AppV2 chrome (never reaches this hook), so 'popout' in
+  // the hook means a module button (e.g. Magaambya Helper uses it as its class).
+  static _NATIVE_CLASSES = new Set([
+    'close', 'configure-sheet', 'configure-token', 'configure-creature', 'import',
+  ]);
+
+  /**
+   * Saves any newly-seen buttons to the persistent discovered setting.
+   * Skips native Foundry/system buttons — only module-added buttons are tracked.
+   */
+  static _discover(buttons) {
+    const discovered = game.settings.get(GBToolbelt.MODULE_ID, 'discoveredButtons') ?? {};
+    let changed = false;
+    for (const btn of buttons) {
+      if (!btn.class || GBToolbarFilter._NATIVE_CLASSES.has(btn.class) || discovered[btn.class]) continue;
+      discovered[btn.class] = { label: btn.label ?? btn.class, icon: btn.icon ?? '' };
+      changed = true;
+    }
+    if (changed) game.settings.set(GBToolbelt.MODULE_ID, 'discoveredButtons', discovered);
+  }
+
+  /** Removes buttons that the rules say shouldn't appear for this actor type. */
+  static _apply(actorType, buttons) {
+    if (!actorType) return;
+    const rules = game.settings.get(GBToolbelt.MODULE_ID, 'buttonVisibilityRules') ?? {};
+    for (let i = buttons.length - 1; i >= 0; i--) {
+      const btn = buttons[i];
+      if (!btn.class) continue;
+      const rule = rules[btn.class];
+      if (rule && !rule.includes(actorType)) buttons.splice(i, 1);
+    }
+  }
+}
+
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 Hooks.once('init', () => {
   const module = game.modules.get(GBToolbelt.MODULE_ID);
-  if (module) module.api = GBToolbelt;
+  if (module) {
+    GBToolbelt.commanderBanner = GBCommanderBanner;
+    module.api = GBToolbelt;
+  }
   GBToolbelt.initialize();
   GBHeroPoints.initialize();
+  GBCommanderBanner.initialize();
+  GBToolbarFilter.initialize();
 });

@@ -2,7 +2,7 @@
 
 Unified reference for all Greenbottle's FoundryVTT modules, built for Pathfinder 2e / Starfinder 2e (via sf2e-anachronism).
 
-**Foundry:** v13 | **System:** PF2e 6.0+
+**Foundry:** v13–v14 | **System:** PF2e 6.0+
 
 ---
 
@@ -10,7 +10,7 @@ Unified reference for all Greenbottle's FoundryVTT modules, built for Pathfinder
 
 | Module | Version | Purpose |
 |--------|---------|---------|
-| [greenbottles-toolbelt](#greenbottles-toolbelt) | 1.2.0 | Shared utility library + GM hero point tools (required by all others) |
+| [greenbottles-toolbelt](#greenbottles-toolbelt) | 1.4.0 | Shared utility library + GM tools (required by all others) |
 | [greenbottles-ammo-belt](#greenbottles-ammo-belt) | 1.2.0 | Custom SF2e ammo types + weapon assignment UI |
 | [greenbottles-hacking-quips](#greenbottles-hacking-quips) | 2.2.0 | Hacking quips, Timber Sentinel, Knives & Daggers |
 | [greenbottles-vitality-network](#greenbottles-vitality-network) | 1.2.0 | SF2e vitality network automation |
@@ -47,9 +47,9 @@ All modules are installable via Foundry Package Manager (search by name) or by p
 
 ## Greenbottle's Toolbelt
 
-**Repo:** [greenbottles-toolbelt](https://github.com/Ayabara1013/greenbottles-toolbelt) | **v1.1.0**
+**Repo:** [greenbottles-toolbelt](https://github.com/Ayabara1013/greenbottles-toolbelt) | **v1.4.0**
 
-Shared utility library for all Greenbottle's modules. Also includes GBHeroPoints — a GM toolbar button for bulk party hero point management.
+Shared utility library for all Greenbottle's modules. Also includes several GM-facing features: hero point management, Plant Banner automation, actor sheet toolbar filtering, and SF2e spell/feat automation (Elemental Weapon, Runesmith).
 
 ### Using the API
 
@@ -130,6 +130,52 @@ GM-only star button (⭐) in the Token Controls toolbar. Opens a dialog for bulk
 
 Uses `GBToolbelt.updateActorResource()` internally for clamped writes.
 
+### GBCommanderBanner
+
+Automates the Plant Banner commander feat. When a banner token is placed on the canvas (via Portal crosshair), it registers an aura template that follows the token on move. At the start of each of the commander's turns, adjacent allies automatically receive temp HP equal to the commander's Charisma modifier (minimum 1). A chat card is posted each turn (visible to all players) with a clickable Apply button as an alternative to automatic application.
+
+**Requires:** socketlib (for non-GM players placing banners), portal-lib (for crosshair placement UI).
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Auto-Apply Temp HP | `true` | Apply temp HP automatically; if off, chat card button only |
+| Banner Aura Radius | `15` | Radius in feet of the banner's aura |
+
+### GBToolbarFilter
+
+GM-only per-button, per-actor-type visibility control for actor sheet header buttons added by modules.
+
+**Module Settings → Toolbar Button Visibility → Configure** opens a checkbox grid: rows are all discovered module buttons, columns are PF2e actor types. Unchecking a cell hides that button for that actor type on every sheet open. A master enable/disable toggle is also available.
+
+Buttons are auto-discovered: the filter watches `getActorSheetHeaderButtons` for API-registered buttons and performs a deferred DOM scan after each render to catch buttons injected directly into the DOM (e.g. modules that use `renderActorSheet`).
+
+| Setting | Scope | Description |
+|---------|-------|-------------|
+| Toolbar Filter: Enabled | World | Master switch — disable to show all buttons regardless of rules |
+| Toolbar Button Visibility → Configure | World, GM only | Opens the checkbox grid dialog |
+
+### GBElementalWeapon
+
+Automation for the SF2e **Elemental Weapon** focus spell.
+
+On cast, prompts the caster to choose an element (Air/Earth/Fire/Metal/Water/Wood). Derives weapon grade and item level from the spell rank, creates a real weapon item in the caster's inventory with the correct damage type and traits, and attaches a spell effect. When the effect expires or is dismissed, the weapon is removed automatically.
+
+```js
+const api = game.modules.get('greenbottles-toolbelt')?.api;
+await api.elementalWeapon.cast();
+```
+
+### GBRunesmith
+
+Automation for the SF2e **Runesmith** extempore rune inscription feat.
+
+Reads base runes and diacritics (identified by the `diacritic` trait) from the Runesmith's inventory. A persistent UI lets the player pick a base rune and optional diacritic; the combined rule elements are applied to the target weapon as a single effect. Includes setup and invocation macros in the `macros/` folder.
+
+```js
+const api = game.modules.get('greenbottles-toolbelt')?.api;
+await api.runesmith.manageRunes();  // open the rune selection UI
+```
+
 ### Declaring as a Dependency
 
 In your module's `module.json`:
@@ -139,7 +185,7 @@ In your module's `module.json`:
     {
       "id": "greenbottles-toolbelt",
       "type": "module",
-      "compatibility": { "minimum": "1.1.0" }
+      "compatibility": { "minimum": "1.4.0" }
     }
   ]
 }
@@ -149,6 +195,8 @@ In your module's `module.json`:
 
 | Version | Changes |
 |---------|---------|
+| 1.4.0 | GBToolbarFilter — per-button per-actor-type header button visibility. GBElementalWeapon — Elemental Weapon focus spell automation. GBRunesmith — Runesmith extempore rune inscription automation. SF2e anachronism v2 icon migration macro. |
+| 1.3.0 | GBCommanderBanner — Plant Banner feat automation with aura template, auto temp HP, and chat card. socketlib integration for non-GM banner placement. |
 | 1.1.0 | Absorbed `greenbottles-toolbelt__hero-points` (deprecated). `GBHeroPoints` class now lives here. |
 | 1.0.0 | Initial release: `GBToolbelt` shared utility library |
 
