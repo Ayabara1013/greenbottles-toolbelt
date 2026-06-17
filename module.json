@@ -8,9 +8,7 @@
   },
   "socket": true,
   "esmodules": [
-    "scripts/toolbelt.js",
-    "scripts/elemental-weapon.js",
-    "scripts/runesmith.js"
+    "scripts/toolbelt.js"
   ],
   "styles": [
     "styles/toolbelt.css"
