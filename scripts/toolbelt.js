@@ -290,19 +290,31 @@ class GBHeroPoints {
   static _addToolbarButton(controls) {
     if (!game.user.isGM) return;
 
-    const tokenControls = controls.find(c => c.name === 'token');
+    // Foundry v14 passes controls as a Map<string, SceneControl>;
+    // v13 passes a plain Array. Handle both.
+    const tokenControls = controls instanceof Map
+      ? controls.get('token')
+      : controls.find?.(c => c.name === 'token');
+
     if (!tokenControls) {
       console.error("GBHeroPoints | Token controls not found — cannot add Hero Points button.");
       return;
     }
 
-    tokenControls.tools.push({
+    const tool = {
       name: 'heroPoints',
       title: 'Assign Hero Points',
       icon: 'fas fa-star',
       onClick: () => GBHeroPoints.openDialog(),
       button: true
-    });
+    };
+
+    // v14: tools is a Map<string, SceneControlButton>; v13: tools is an Array.
+    if (tokenControls.tools instanceof Map) {
+      tokenControls.tools.set('heroPoints', tool);
+    } else {
+      tokenControls.tools.push(tool);
+    }
   }
 
   // ── Dialog ────────────────────────────────────────────────────────────────
