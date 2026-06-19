@@ -1,7 +1,7 @@
 {
   "id": "greenbottles-toolbelt",
   "title": "Greenbottle's Toolbelt",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "compatibility": {
     "minimum": "13",
     "verified": "14"

@@ -10,10 +10,10 @@ Unified reference for all Greenbottle's FoundryVTT modules, built for Pathfinder
 
 | Module | Version | Purpose |
 |--------|---------|---------|
-| [greenbottles-toolbelt](#greenbottles-toolbelt) | 1.4.0 | Shared utility library + GM tools (required by all others) |
-| [greenbottles-ammo-belt](#greenbottles-ammo-belt) | 1.1.2.7 | Custom SF2e ammo types + weapon assignment UI |
-| [greenbottles-hacking-quips](#greenbottles-hacking-quips) | 2.1.2 | Hacking quips, Timber Sentinel, Knives & Daggers |
-| [greenbottles-vitality-network](#greenbottles-vitality-network) | 1.1.0 | SF2e vitality network automation |
+| [greenbottles-toolbelt](#greenbottles-toolbelt) | 1.4.1 | Shared utility library + GM tools (required by all others) |
+| [greenbottles-ammo-belt](#greenbottles-ammo-belt) | 1.2.0 | Custom SF2e ammo types + weapon assignment UI |
+| [greenbottles-hacking-quips](#greenbottles-hacking-quips) | 2.2.0 | Hacking quips, Timber Sentinel, Knives & Daggers |
+| [greenbottles-vitality-network](#greenbottles-vitality-network) | 1.2.0 | SF2e vitality network automation |
 
 All modules expose their packs in a single **"Greenbottle's Toolbelt"** folder in the Foundry compendium sidebar *(each module declares the same `packFolders` name; Foundry merges them automatically — the toolbelt itself has no packs)*.
 
@@ -47,7 +47,7 @@ All modules are installable via Foundry Package Manager (search by name) or by p
 
 ## Greenbottle's Toolbelt
 
-**Repo:** [greenbottles-toolbelt](https://github.com/Ayabara1013/greenbottles-toolbelt) | **v1.4.0**
+**Repo:** [greenbottles-toolbelt](https://github.com/Ayabara1013/greenbottles-toolbelt) | **v1.4.1**
 
 Shared utility library for all Greenbottle's modules. Also includes several GM-facing features: hero point management, Plant Banner automation, and actor sheet toolbar button visibility filtering.
 
@@ -173,6 +173,7 @@ In your module's `module.json`:
 
 | Version | Changes |
 |---------|---------|
+| 1.4.1 | Fix GBHeroPoints star button missing on Foundry v14 — getSceneControlButtons now passes a Map instead of an Array. |
 | 1.4.0 | GBToolbarFilter — per-button per-actor-type header button visibility. SF2e anachronism v2 icon migration macro. |
 | 1.3.0 | GBCommanderBanner — Plant Banner feat automation with aura template, auto temp HP, and chat card. socketlib integration for non-GM banner placement. |
 | 1.1.0 | Absorbed `greenbottles-toolbelt__hero-points` (deprecated). `GBHeroPoints` class now lives here. |
