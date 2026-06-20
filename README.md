@@ -11,7 +11,7 @@ Unified reference for all Greenbottle's FoundryVTT modules, built for Pathfinder
 | Module | Version | Purpose |
 |--------|---------|---------|
 | [greenbottles-toolbelt](#greenbottles-toolbelt) | 1.4.1 | Shared utility library + GM tools (required by all others) |
-| [greenbottles-ammo-belt](#greenbottles-ammo-belt) | 1.2.0 | Custom SF2e ammo types + weapon assignment UI |
+| [greenbottles-ammo-belt](#greenbottles-ammo-belt) | 1.3.0 | Custom ammo types + weapon assignment UI (PF2e + native SF2e) |
 | [greenbottles-hacking-quips](#greenbottles-hacking-quips) | 2.2.0 | Hacking quips, Timber Sentinel, Knives & Daggers |
 | [greenbottles-vitality-network](#greenbottles-vitality-network) | 1.2.0 | SF2e vitality network automation |
 
@@ -185,10 +185,10 @@ In your module's `module.json`:
 
 ## Greenbottle's Ammo Belt
 
-**Repo:** [greenbottles-ammo-belt](https://github.com/Ayabara1013/greenbottles-ammo-belt) | **v1.1.2.7**
-**Requires:** greenbottles-toolbelt, sf2e-anachronism
+**Repo:** [greenbottles-ammo-belt](https://github.com/Ayabara1013/greenbottles-ammo-belt) | **v1.3.0**
+**Requires:** greenbottles-toolbelt | **Recommends:** sf2e-anachronism (only needed in PF2e worlds, for the SF2e weapons)
 
-Adds custom SF2e ammunition types to PF2e's `CONFIG.PF2E.ammoTypes` and provides a GM settings menu for assigning them to weapons.
+Adds custom ammunition types to `CONFIG.PF2E.ammoTypes` and provides a GM settings menu for assigning them to weapons. Works in both PF2e (with anachronism) and the native Starfinder 2e system — the bundled ammunition compendium ships one pack per system.
 
 ### Custom Ammo Types
 
@@ -242,7 +242,8 @@ Overrides are stored in the hidden world setting `weaponAmmoOverrides` (slug →
 
 | Version | Changes |
 |---------|---------|
-| 1.1.2.7 | Current stable |
+| 1.3.0 | Native Starfinder 2e support (dual PF2e/SF2e packs). Art bundled into the module so thumbnails render in any system. Fixed Shotgun Shells ammo-type link. Compendium now built from source in CI so released installs aren't empty. |
+| 1.2.0 | Compendium folder structure + manifest dependency fix |
 | 1.1.0 | Added darts, bolts, rail slugs, cards ammo types |
 | 1.0.0 | Initial release: light/medium/heavy rounds, shells, micro missiles |
 
